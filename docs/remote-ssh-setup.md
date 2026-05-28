@@ -1,0 +1,126 @@
+# Remote SSH Host — Build & Bootstrap
+
+This document captures the verified steps to get this fork building green from a
+clean checkout, plus the design notes for the remote-SSH-host feature
+(`feat/remote-ssh-host`).
+
+## 1. Toolchain bootstrap
+
+The build is driven by **Tuist** (project generation) + **mise** (tool version
+pinning) + **zig** (builds GhosttyKit and the bundled `zmx` binary from source).
+Pinned versions live in `mise.toml`:
+
+| tool      | version  |
+|-----------|----------|
+| tuist     | 4.180.0  |
+| zig       | 0.15.2   |
+| swiftlint | latest   |
+| xcsift    | latest   |
+
+Verified on macOS 26 (Tahoe), Xcode 26.2, Apple Silicon.
+
+### Steps (clean checkout → green build)
+
+```bash
+# 1. Install mise (tool manager). Not pre-installed; required by the Makefile,
+#    which shells every tool through `mise exec -- <tool>`.
+brew install mise
+
+# 2. Trust the repo config and install the pinned toolchain.
+mise trust
+mise install
+# Gotcha: the zmx submodule ships its OWN mise.toml that must also be trusted,
+# otherwise `make build-zmx` fails with "Config files ... are not trusted":
+mise trust ThirdParty/zmx/mise.toml
+
+# 3. Initialize submodules (the build scripts auto-init ghostty/zmx on demand,
+#    but doing it up front is explicit and also pulls Resources/git-wt):
+git submodule update --init --recursive
+
+# 4. Install xcbeautify (log formatter the Makefile pipes xcodebuild through).
+#    It is NOT listed in mise.toml, so on a clean machine `make build-app`
+#    fails with: mise ERROR "xcbeautify" couldn't exec process.
+brew install xcbeautify
+
+# 5. Build native dependencies, generate the project, build the app.
+make build-ghostty-xcframework   # zig → .build/ghostty/GhosttyKit.xcframework (slow, cached by fingerprint)
+make build-zmx                    # zig → .build/zmx/bin/zmx (universal: x86_64 + arm64)
+make generate-project             # tuist generate → supacode.xcworkspace
+make build-app                    # xcodebuild Debug → "Build Succeeded"
+make run-app                      # launch the Debug build
+```
+
+`make build-app` already depends on the generation stamp, and the Tuist project
+has build phases that invoke `build-ghostty.sh` / `build-zmx.sh`, so once the
+native deps are cached a plain `make build-app` is enough on subsequent runs.
+
+### Reusing an existing zig 0.15.2
+
+If `~/.ttf-toolchain/zig-aarch64-macos-0.15.2/zig` already exists you can reuse
+it, but note that this fork's GhosttyKit build fingerprints on the **pinned
+submodule commit** (`ThirdParty/ghostty`), so a prebuilt xcframework from a
+*different* ghostty checkout is not reused — `mise install`'s own zig 0.15.2 is
+the simplest path.
+
+### Known gotchas (summary)
+
+- `mise` is not pre-installed; the Makefile assumes it.
+- The `ThirdParty/zmx` submodule has a nested `mise.toml` that needs a separate
+  `mise trust`.
+- `xcbeautify` is referenced by the Makefile but absent from `mise.toml`;
+  install it via brew.
+- GitHub API rate limits (HTTP 403) during `mise install` only affect optional
+  build-time deps (`zls`, `bats`) pulled in by the zmx build; they retry/resolve
+  and don't block the app build.
+
+## 2. Remote SSH host — design (Phase A)
+
+Goal: a worktree can live on a **remote host**; its git/worktree operations and
+its terminal (zmx) run remotely over SSH, while libghostty renders locally. No
+file sync — just terminal + git. The single chokepoint is the transport: make
+`ShellClient` host-aware, and the rest of `GitClient` follows.
+
+### Pieces
+
+1. **`RemoteHost`** (`SupacodeSettingsShared/Models/RemoteHost.swift`) — value
+   type describing an SSH destination: `alias`, optional `username`, `port`, and
+   a remote `worktreeBasePath`. `nil` host everywhere means "local" (unchanged
+   behavior).
+
+2. **`SSHCommand`** (`SupacodeSettingsShared/Support/SSHCommand.swift`) — pure,
+   stateless builders:
+   - `controlOptions` — SSH `ControlMaster=auto` multiplexing so N git calls +
+     the terminal share one connection (one auth / FIDO touch, no per-call RTT
+     storm).
+   - `remoteCommand(executable:arguments:workingDirectory:)` — the string the
+     remote shell runs; working directory becomes `cd -- <dir> && exec ...`.
+   - `invocation(...)` — full local `ssh` argv for `Process`/`ShellClient`.
+   - `commandLine(...)` — full `ssh` line as a single string for a parent
+     `/bin/sh -c` (Ghostty's surface command), TTY allocated.
+
+3. **`ShellClient.ssh(host:base:)`** — wraps an inner `ShellClient` so every
+   `run` / `runStream` / `runLogin*` transforms `(exe, args, cwd)` into an
+   `ssh <host> <remoteCommand>` invocation. This is the load-bearing chokepoint:
+   `GitClient(shell: .ssh(host:))` makes all git/`wt` paths run remotely.
+
+4. **`GitClientDependency.ssh(host:)`** — same closures as `liveValue` but every
+   `GitClient` is constructed with the ssh-flavored shell.
+
+5. **Terminal launch** — `ZmxAttach.buildRemoteCommand(host:sessionID:userCommand:)`
+   produces `ssh -tt <host> zmx attach supa-<uuid> [/bin/sh -c '<cmd>']`. When a
+   worktree carries a `host`, `WorktreeTerminalState.createSurface` passes this
+   as the surface command and `workingDirectory: nil` (the path is remote).
+
+### Out of scope for Phase A (follow-ups)
+
+- Real-host SSH connectivity + libghostty rendering verification (needs a FIDO
+  touch and human eyes — validated manually, not in CI/tests).
+- Host selection UI + persistence; `RemoteHost` plumbing through `Repository` /
+  persisted layouts.
+- `Worktree.id` is `workingDirectory.path`; across hosts paths can collide, so
+  ids must be host-keyed (`<host>:<path>`) with a persistence migration before
+  remote and local worktrees coexist.
+- The bundled `wt` binary path is local; remote worktree creation assumes `git`
+  (and the `wt` shim) are available on the remote `$PATH`.
+- File watching: the local kqueue HEAD watcher can't cross SSH; replace with a
+  debounced `git rev-parse HEAD` poll for remote worktrees.
