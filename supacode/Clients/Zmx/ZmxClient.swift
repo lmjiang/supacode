@@ -315,4 +315,28 @@ nonisolated enum ZmxAttach {
     let escaped = value.replacing("'", with: "'\\''")
     return "'\(escaped)'"
   }
+
+  /// Remote counterpart to `buildCommand`: the surface command that, run by the
+  /// local `/bin/sh -c`, opens an SSH session to `host` and attaches the remote
+  /// zmx daemon. `workingDirectory` is left nil by the caller — the path lives
+  /// on the remote. The remote shell re-parses the attach string, so the user
+  /// command's inner `/bin/sh -c '<cmd>'` quoting survives the outer
+  /// local-shell quoting that `SSHCommand.commandLine` applies.
+  static func buildRemoteCommand(host: RemoteHost, sessionID: String, userCommand: String?) -> String {
+    SSHCommand.commandLine(
+      host: host,
+      remoteCommand: remoteAttachCommand(sessionID: sessionID, userCommand: userCommand)
+    )
+  }
+
+  /// The command the *remote* shell runs: `zmx attach <id> [/bin/sh -c '<cmd>']`.
+  /// Mirrors `buildCommand` but resolves `zmx` on the remote PATH rather than an
+  /// absolute local bundle path.
+  static func remoteAttachCommand(sessionID: String, userCommand: String?) -> String {
+    let attach = "zmx attach \(sessionID)"
+    guard let command = userCommand?.trimmingCharacters(in: .whitespacesAndNewlines), !command.isEmpty else {
+      return attach
+    }
+    return "\(attach) /bin/sh -c \(shellQuote(command))"
+  }
 }

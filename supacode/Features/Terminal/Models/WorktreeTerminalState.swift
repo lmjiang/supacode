@@ -1338,10 +1338,17 @@ final class WorktreeTerminalState {
       initialInput: initialInput,
       bypassZmx: bypassZmx
     )
+    // Remote worktrees have no local working directory: the surface command is
+    // an `ssh …` line (see `resolveZmxWrapping`) and the cwd lives on the
+    // remote, so leave `working_directory` nil and let the remote shell `cd`.
+    let resolvedWorkingDirectory: URL? =
+      worktree.host == nil
+      ? (workingDirectoryOverride ?? inherited.workingDirectory ?? worktree.workingDirectory)
+      : nil
     let view = GhosttySurfaceView(
       id: surfaceID,
       runtime: runtime,
-      workingDirectory: workingDirectoryOverride ?? inherited.workingDirectory ?? worktree.workingDirectory,
+      workingDirectory: resolvedWorkingDirectory,
       command: resolvedCommand,
       initialInput: resolvedInitialInput,
       environmentVariables: surfaceEnvironment(tabId: tabId, surfaceID: surfaceID),
@@ -1438,6 +1445,12 @@ final class WorktreeTerminalState {
       return (command, initialInput)
     }
     let sessionID = ZmxSessionID.make(surfaceID: surfaceID)
+    // Remote worktree: launch zmx on the host over SSH. zmx is authoritative for
+    // attach-vs-create remotely just as it is locally, so the surface command is
+    // always the remote attach line (no local budget probe / bundle path).
+    if let host = worktree.host {
+      return (ZmxAttach.buildRemoteCommand(host: host, sessionID: sessionID, userCommand: command), initialInput)
+    }
     guard let wrapped = zmxClient.wrapCommand(sessionID, command) else {
       return (command, initialInput)
     }
