@@ -60,13 +60,19 @@ struct GitClientRemoteSSHTests {
     )
     #expect(snapshot.arguments.count == 8)
 
-    let remoteCommand = snapshot.arguments[7]
-    // `cd -- <repoRoot> && exec /usr/bin/env LANG=C … <wt> …` — every token
-    // single-quoted for the remote shell. The bundled `wt` path is volatile, so
-    // assert around it.
-    #expect(remoteCommand.hasPrefix("cd -- '/tmp/repo' && exec '/usr/bin/env' 'LANG=C' 'LC_ALL=C' 'LC_MESSAGES=C' "))
-    #expect(remoteCommand.contains("'--base-dir' '/tmp/repo/.worktrees' 'sw'"))
-    #expect(remoteCommand.contains("'--from' 'origin/main'"))
-    #expect(remoteCommand.hasSuffix("'swift-otter'"))
+    // The single remote arg is login-shell wrapped (so Homebrew's PATH is on
+    // the remote); the payload carries `cd -- <repoRoot> && exec … <wt> …`.
+    // The wrapping re-quotes the inner single-quotes, so assert on bare tokens.
+    let wrapped = snapshot.arguments[7]
+    #expect(wrapped.hasPrefix("exec \"$SHELL\" -l -c "))
+    #expect(wrapped.contains("cd -- "))
+    #expect(wrapped.contains("/tmp/repo"))
+    #expect(wrapped.contains("LANG=C"))
+    #expect(wrapped.contains("--base-dir"))
+    #expect(wrapped.contains("/tmp/repo/.worktrees"))
+    #expect(wrapped.contains("sw"))
+    #expect(wrapped.contains("--from"))
+    #expect(wrapped.contains("origin/main"))
+    #expect(wrapped.contains("swift-otter"))
   }
 }

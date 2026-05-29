@@ -56,6 +56,18 @@ public nonisolated enum SSHCommand {
     return "cd -- \(directory) && exec \(invocation)"
   }
 
+  /// Wrap a remote command so it runs under a **login** shell. ssh's default
+  /// `$SHELL -c <cmd>` is non-interactive *and* non-login, so on macOS it only
+  /// inherits `~/.zshenv`'s bare PATH (`/usr/bin:/bin:/usr/sbin:/sbin`) —
+  /// Homebrew's `/opt/homebrew/bin` (where remote `zmx` / `git` / the `wt` shim
+  /// live) is NOT on it, so the remote command fails with `command not found`.
+  /// A login shell reads `/etc/zprofile` (path_helper) + `~/.zprofile`
+  /// (`brew shellenv`), restoring the full PATH. `$SHELL` is expanded by ssh's
+  /// own outer shell; `exec` replaces it so signals / exit status pass through.
+  public static func loginShellWrapped(_ remoteScript: String) -> String {
+    "exec \"$SHELL\" -l -c " + shellQuote(remoteScript)
+  }
+
   /// Full local `ssh` argv for `Process` / `ShellClient`. The remote command is
   /// a single argument; ssh hands it to the remote login shell verbatim.
   public static func invocation(
@@ -73,15 +85,17 @@ public nonisolated enum SSHCommand {
     sshArguments += host.sshOptionArguments
     sshArguments.append(host.sshDestination)
     sshArguments.append(
-      remoteCommand(executable: executable, arguments: arguments, workingDirectory: workingDirectory)
+      loginShellWrapped(
+        remoteCommand(executable: executable, arguments: arguments, workingDirectory: workingDirectory)
+      )
     )
     return (URL(fileURLWithPath: sshExecutablePath), sshArguments)
   }
 
   /// Full `ssh` line as a single string for a parent `/bin/sh -c` (Ghostty's
   /// surface command). The fixed option tokens are shell-safe and stay
-  /// unquoted (so ssh still expands `~` / `%C` in `ControlPath`); only
-  /// `remoteCommand` is quoted for the local shell.
+  /// unquoted (so ssh still expands `~` / `%C` in `ControlPath`); the
+  /// login-shell-wrapped remote command is quoted for the local shell.
   public static func commandLine(
     host: RemoteHost,
     remoteCommand: String,
@@ -95,7 +109,7 @@ public nonisolated enum SSHCommand {
     }
     tokens += host.sshOptionArguments
     tokens.append(host.sshDestination)
-    tokens.append(shellQuote(remoteCommand))
+    tokens.append(shellQuote(loginShellWrapped(remoteCommand)))
     return tokens.joined(separator: " ")
   }
 }
