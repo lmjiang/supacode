@@ -250,7 +250,7 @@ struct RepositoriesFeature {
     case sidebarNestByBranchChanged
     case setOpenPanelPresented(Bool)
     case addRemoteRepository(RemoteRepositoryConfig)
-    case removeRemoteRepository(RemoteRepositoryConfig.ID)
+    case removeRemoteRepository(Repository.ID)
     case loadPersistedRepositories
     case refreshWorktrees
     case reloadRepositories(animated: Bool)
@@ -531,10 +531,12 @@ struct RepositoriesFeature {
         // no local roots (`reloadRepositories` early-returns on empty roots).
         return .send(.loadPersistedRepositories)
 
-      case .removeRemoteRepository(let id):
+      case .removeRemoteRepository(let repositoryID):
         @Shared(.settingsFile) var settingsFile
         $settingsFile.withLock { settings in
-          settings.global.remoteRepositories.removeAll { $0.id == id }
+          settings.global.remoteRepositories.removeAll {
+            Self.remoteRepositoryID(for: $0) == repositoryID
+          }
         }
         return .send(.loadPersistedRepositories)
 
@@ -876,6 +878,17 @@ struct RepositoriesFeature {
           )
           return .none
         }
+        // Remote worktree creation (running `git worktree add` over ssh) is a
+        // follow-up. Until then, reject so menu / hotkey / palette paths don't
+        // fall into the local `gitClient.createWorktreeStream` against a remote
+        // path. The sidebar `+` is already hidden for remote repos.
+        if repository.host != nil {
+          state.alert = messageAlert(
+            title: "Unable to create worktree",
+            message: "Creating worktrees on a remote repository isn't supported yet."
+          )
+          return .none
+        }
         if state.removingRepositoryIDs[repository.id] != nil {
           state.alert = messageAlert(
             title: "Unable to create worktree",
@@ -1157,6 +1170,17 @@ struct RepositoriesFeature {
           if let rejectedBranchName {
             state.dropPendingCustomization(repositoryID: repository.id, branchName: rejectedBranchName)
           }
+          return .none
+        }
+        // Remote worktree creation (running `git worktree add` over ssh) is a
+        // follow-up. Until then, reject so menu / hotkey / palette paths don't
+        // fall into the local `gitClient.createWorktreeStream` against a remote
+        // path. The sidebar `+` is already hidden for remote repos.
+        if repository.host != nil {
+          state.alert = messageAlert(
+            title: "Unable to create worktree",
+            message: "Creating worktrees on a remote repository isn't supported yet."
+          )
           return .none
         }
         if state.removingRepositoryIDs[repository.id] != nil {
@@ -2396,6 +2420,12 @@ struct RepositoriesFeature {
         return state.setRowLifecycleEffect(worktreeID, .idle)
 
       case .requestDeleteRepository(let repositoryID):
+        // Remote repos aren't on disk locally — removing one just drops its
+        // persisted config + reloads; the remote files are untouched. No
+        // local-removal confirmation flow.
+        if state.repositories[id: repositoryID]?.host != nil {
+          return .send(.removeRemoteRepository(repositoryID))
+        }
         state.alert = confirmationAlertForRepositoryRemoval(repositoryID: repositoryID, state: state)
         return .none
 
@@ -3856,8 +3886,8 @@ struct RepositoriesFeature {
     }
     // Remote repositories are appended on every load path (they don't live in
     // `repositoryRoots`, so `reload`/`open`/removal would otherwise drop them).
-    // Their host-keyed ids never collide with the local `loaded` set.
-    let remoteRepositories = Self.synthesizeRemoteRepositories(Self.persistedRemoteRepositoryConfigs())
+    // Loaded as real git over SSH; host-keyed ids never collide with `loaded`.
+    let remoteRepositories = await Self.loadRemoteRepositories(Self.persistedRemoteRepositoryConfigs())
     return (loaded + remoteRepositories, failures)
   }
 

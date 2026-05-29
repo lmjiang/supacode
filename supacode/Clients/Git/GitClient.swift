@@ -145,6 +145,68 @@ struct GitClient {
       .map(\.worktree)
   }
 
+  /// Worktrees via standard `git worktree list --porcelain`. Used for remote
+  /// (SSH) repositories where the bundled `wt` shim isn't available — the only
+  /// requirement is `git` on the remote PATH. Returns the same `Worktree`
+  /// shape as `worktrees(for:)`; the caller injects `host` / host-keyed ids.
+  /// Remote paths can't be stat'd locally, so `isMissing` is always false and
+  /// there's no creation-date sort (git's listing order is kept, main first).
+  nonisolated func gitWorktrees(for repoRoot: URL) async throws -> [Worktree] {
+    let repositoryRootURL = repoRoot.standardizedFileURL
+    let output = try await runGit(
+      operation: .worktreeList,
+      arguments: ["-C", repositoryRootURL.path(percentEncoded: false), "worktree", "list", "--porcelain"]
+    )
+    return Self.parseWorktreePorcelain(output, repositoryRootURL: repositoryRootURL)
+  }
+
+  /// Parse `git worktree list --porcelain`: blank-line-separated blocks of
+  /// `worktree <path>` / `HEAD <sha>` / `branch refs/heads/<name>` (or
+  /// `detached`); a `bare` block for the bare root is skipped.
+  nonisolated static func parseWorktreePorcelain(
+    _ output: String,
+    repositoryRootURL: URL
+  ) -> [Worktree] {
+    var worktrees: [Worktree] = []
+    for block in output.components(separatedBy: "\n\n") {
+      var path: String?
+      var branch: String?
+      var isBare = false
+      var isDetached = false
+      for rawLine in block.split(whereSeparator: \.isNewline) {
+        let line = String(rawLine).trimmingCharacters(in: .whitespaces)
+        if line.hasPrefix("worktree ") {
+          path = String(line.dropFirst("worktree ".count))
+        } else if line.hasPrefix("branch ") {
+          let ref = String(line.dropFirst("branch ".count))
+          let headsPrefix = "refs/heads/"
+          branch = ref.hasPrefix(headsPrefix) ? String(ref.dropFirst(headsPrefix.count)) : ref
+        } else if line == "bare" {
+          isBare = true
+        } else if line == "detached" {
+          isDetached = true
+        }
+      }
+      guard let path, !path.isEmpty, !isBare else { continue }
+      let worktreeURL = URL(fileURLWithPath: path).standardizedFileURL
+      let isAttached = (branch != nil) && !isDetached
+      let name = isAttached ? (branch ?? worktreeURL.lastPathComponent) : worktreeURL.lastPathComponent
+      worktrees.append(
+        Worktree(
+          id: worktreeURL.path(percentEncoded: false),
+          name: name,
+          detail: relativePath(from: repositoryRootURL, to: worktreeURL),
+          workingDirectory: worktreeURL,
+          repositoryRootURL: repositoryRootURL,
+          createdAt: nil,
+          isMissing: false,
+          isAttached: isAttached
+        )
+      )
+    }
+    return worktrees
+  }
+
   // Backfill-only: never drop Supacode-owned locks here. Supacode-initiated
   // `removeWorktree` is the sole release path.
   nonisolated func reconcileSupacodeLocks(for repoRoot: URL) async {

@@ -286,6 +286,7 @@ private struct SidebarGitRepositorySection: View {
       SidebarSectionActionsView(
         repositoryID: repository.id,
         isRemovingRepository: isRemovingRepository,
+        isRemote: repository.host != nil,
         store: store
       )
     }
@@ -304,6 +305,10 @@ private struct SidebarGitRepositorySection: View {
 private struct SidebarSectionActionsView: View {
   let repositoryID: Repository.ID
   let isRemovingRepository: Bool
+  /// Remote (SSH) repositories don't yet support worktree creation, so the
+  /// `+` is hidden for them. Remove routes to `removeRemoteRepository` inside
+  /// the reducer (no local-removal confirmation).
+  var isRemote: Bool = false
   let store: StoreOf<RepositoriesFeature>
 
   var body: some View {
@@ -313,15 +318,21 @@ private struct SidebarSectionActionsView: View {
       }
       .help("Set a custom title or color")
       .disabled(isRemovingRepository)
-      Button("Repository Settings…", systemImage: "gear") {
-        store.send(.openRepositorySettings(repositoryID))
+      if !isRemote {
+        Button("Repository Settings…", systemImage: "gear") {
+          store.send(.openRepositorySettings(repositoryID))
+        }
+        .help("Repository Settings")
       }
-      .help("Repository Settings")
       Divider()
-      Button("Remove Repository…", systemImage: "folder.badge.minus", role: .destructive) {
+      Button(
+        isRemote ? "Remove Remote Repository…" : "Remove Repository…",
+        systemImage: "folder.badge.minus",
+        role: .destructive
+      ) {
         store.send(.requestDeleteRepository(repositoryID))
       }
-      .help("Remove Repository")
+      .help(isRemote ? "Remove this remote repository (remote files are untouched)" : "Remove Repository")
       .disabled(isRemovingRepository)
     } label: {
       Image(systemName: "ellipsis")
@@ -331,19 +342,21 @@ private struct SidebarSectionActionsView: View {
     }
     .menuStyle(.secondaryToolbar)
 
-    Button {
-      store.send(.createRandomWorktreeInRepository(repositoryID))
-    } label: {
-      Image(systemName: "plus")
-        .accessibilityLabel("New Worktree")
-        .frame(maxHeight: .infinity)
-        .contentShape(Rectangle())
+    if !isRemote {
+      Button {
+        store.send(.createRandomWorktreeInRepository(repositoryID))
+      } label: {
+        Image(systemName: "plus")
+          .accessibilityLabel("New Worktree")
+          .frame(maxHeight: .infinity)
+          .contentShape(Rectangle())
+      }
+      .buttonStyle(.plain)
+      .disabled(isRemovingRepository)
+      .foregroundStyle(.secondary)
+      .help("New Worktree")
+      .padding(.trailing, 4)
     }
-    .buttonStyle(.plain)
-    .disabled(isRemovingRepository)
-    .foregroundStyle(.secondary)
-    .help("New Worktree")
-    .padding(.trailing, 4)
   }
 }
 

@@ -15,10 +15,10 @@ extension RepositoriesFeature {
     "remote:" + config.host.sshDestination + ":" + config.normalizedRemotePath
   }
 
-  /// Worktree.ID for a remote config's synthetic worktree. Host-keyed for the
-  /// same collision-avoidance reason as `remoteRepositoryID`.
-  static func remoteWorktreeID(for config: RemoteRepositoryConfig) -> Worktree.ID {
-    "remote-wt:" + config.host.sshDestination + ":" + config.normalizedRemotePath
+  /// Host-keyed worktree id `<sshDestination>:<remotePath>` so worktrees at the
+  /// same path on different hosts (or matching a local path) never collide.
+  static func remoteWorktreeID(host: RemoteHost, worktreePath: String) -> Worktree.ID {
+    host.sshDestination + ":" + worktreePath
   }
 
   /// The persisted remote-repository configs. Read through `@Shared` so every
@@ -28,42 +28,75 @@ extension RepositoriesFeature {
     return settingsFile.global.remoteRepositories
   }
 
-  /// Materialize each remote config into a folder-kind `Repository` whose single
-  /// synthetic worktree carries `host`. Folder-kind means no git shell-outs run
-  /// against the (unreachable-locally) remote path; selection + terminal binding
-  /// reuse the standard folder machinery, and the terminal launches over SSH
-  /// because `Worktree.host` is non-nil (Phase A). De-dupes by repository id so
-  /// a duplicated config can't trap `IdentifiedArray(uniqueElements:)`.
-  static func synthesizeRemoteRepositories(_ configs: [RemoteRepositoryConfig]) -> [Repository] {
-    var seen: Set<Repository.ID> = []
+  /// Load each remote config as a real git repository over SSH. Serial — the
+  /// ssh ControlMaster keeps a burst to one connection, and the remote count is
+  /// small. Worktrees come from `git worktree list --porcelain` on the host;
+  /// `host` + host-keyed ids are injected here. On any failure (unreachable,
+  /// not a git repo, git missing) we fall back to a single synthetic main
+  /// worktree so the repo stays visible/selectable and the terminal attach
+  /// surfaces the remote error.
+  static func loadRemoteRepositories(_ configs: [RemoteRepositoryConfig]) async -> [Repository] {
     var result: [Repository] = []
+    var seen: Set<Repository.ID> = []
     for config in configs {
       let repoID = remoteRepositoryID(for: config)
       guard seen.insert(repoID).inserted else { continue }
-      let path = config.normalizedRemotePath
-      // `workingDirectory` holds the real remote path (used to `cd` on attach
-      // and for the row subtitle); it is never opened locally.
-      let rootURL = URL(fileURLWithPath: path)
-      let worktree = Worktree(
-        id: remoteWorktreeID(for: config),
-        name: config.resolvedDisplayName,
-        detail: config.host.sshDestination,
-        workingDirectory: rootURL,
-        repositoryRootURL: rootURL,
-        isAttached: false,
-        host: config.host
-      )
-      result.append(
-        Repository(
-          id: repoID,
-          rootURL: rootURL,
-          name: config.resolvedDisplayName,
-          worktrees: IdentifiedArray(uniqueElements: [worktree]),
-          isGitRepository: false,
-          host: config.host
-        )
-      )
+      result.append(await loadRemoteRepository(config, repoID: repoID))
     }
     return result
+  }
+
+  private static func loadRemoteRepository(
+    _ config: RemoteRepositoryConfig,
+    repoID: Repository.ID
+  ) async -> Repository {
+    let host = config.host
+    let rootURL = URL(fileURLWithPath: config.normalizedRemotePath)
+    let client = GitClient(shell: .ssh(host: host))
+    let worktrees: [Worktree]
+    if let loaded = try? await client.gitWorktrees(for: rootURL), !loaded.isEmpty {
+      worktrees = loaded.map { remoteWorktree(from: $0, host: host) }
+    } else {
+      worktrees = [remoteMainWorktree(config: config)]
+    }
+    return Repository(
+      id: repoID,
+      rootURL: rootURL,
+      name: config.resolvedDisplayName,
+      worktrees: IdentifiedArray(uniqueElements: worktrees),
+      isGitRepository: true,
+      host: host
+    )
+  }
+
+  /// Re-key a worktree parsed from the remote `git worktree list` with the host
+  /// and a host-keyed id, preserving everything else.
+  static func remoteWorktree(from base: Worktree, host: RemoteHost) -> Worktree {
+    Worktree(
+      id: remoteWorktreeID(host: host, worktreePath: base.workingDirectory.path(percentEncoded: false)),
+      name: base.name,
+      detail: base.detail,
+      workingDirectory: base.workingDirectory,
+      repositoryRootURL: base.repositoryRootURL,
+      createdAt: base.createdAt,
+      isMissing: base.isMissing,
+      isAttached: base.isAttached,
+      host: host
+    )
+  }
+
+  /// Synthetic main worktree used when the remote git listing is unavailable.
+  /// `workingDirectory == repositoryRootURL` so it classifies as the git main.
+  static func remoteMainWorktree(config: RemoteRepositoryConfig) -> Worktree {
+    let rootURL = URL(fileURLWithPath: config.normalizedRemotePath)
+    return Worktree(
+      id: remoteWorktreeID(host: config.host, worktreePath: config.normalizedRemotePath),
+      name: config.resolvedDisplayName,
+      detail: config.host.sshDestination,
+      workingDirectory: rootURL,
+      repositoryRootURL: rootURL,
+      isAttached: false,
+      host: config.host
+    )
   }
 }

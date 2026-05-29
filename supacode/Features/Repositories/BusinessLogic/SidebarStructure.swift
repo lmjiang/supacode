@@ -641,13 +641,20 @@ extension RepositoriesFeature.State {
       localSections.append(.repository(repositoryID: repositoryID, groups: groups))
     }
 
-    // Remote repositories (folder-kind, host != nil). Rendered as their own
-    // partition in repositories order. Not reorderable: SSH repos aren't part
-    // of the local `repositoryRoots` move/persist machinery.
+    // Remote repositories (real git over SSH, host != nil). Rendered as their
+    // own partition in repositories order, as full git sections (worktree
+    // slots). Not reorderable: SSH repos aren't part of the local
+    // `repositoryRoots` move/persist machinery.
     var remoteSections: [SidebarStructure.Section] = []
     for repository in repositories where repository.host != nil {
-      guard let rowID = repository.worktrees.first?.id, !hoisted.contains(rowID) else { continue }
-      remoteSections.append(.folder(repositoryID: repository.id, rowID: rowID))
+      let groups = SidebarItemGroup.computeSlots(
+        in: self,
+        repositoryID: repository.id,
+        pendingIDs: pendingIDsByRepo[repository.id] ?? [],
+        hoistedRowIDs: hoisted,
+        nestWorktreesByBranch: sidebarNestWorktreesByBranch
+      )
+      remoteSections.append(.repository(repositoryID: repository.id, groups: groups))
     }
 
     // Headers appear only when remote repos exist, so a purely-local sidebar is
