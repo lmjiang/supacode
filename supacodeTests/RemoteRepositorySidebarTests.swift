@@ -40,41 +40,47 @@ struct RemoteRepositoryConfigTests {
   }
 }
 
-struct SynthesizeRemoteRepositoriesTests {
-  @Test func synthesizesFolderKindRepositoryWithHostInjected() {
+struct RemoteRepositoryHelpersTests {
+  @Test func remoteRepositoryIDIsHostKeyedAndPrefixed() {
+    let config = RemoteRepositoryConfig(host: RemoteHost(alias: "mbp"), remotePath: "/tmp/repo", displayName: "repo")
+    let id = RepositoriesFeature.remoteRepositoryID(for: config)
+    #expect(id == "remote:mbp:/tmp/repo")
+    // Never collides with a local repository id (an absolute filesystem path).
+    #expect(id != "/tmp/repo")
+  }
+
+  @Test func remoteWorktreeIDIsHostKeyed() {
+    let id = RepositoriesFeature.remoteWorktreeID(host: RemoteHost(alias: "mbp"), worktreePath: "/tmp/repo/wt")
+    #expect(id == "mbp:/tmp/repo/wt")
+  }
+
+  @Test func remoteWorktreeInjectsHostAndHostKeyedID() {
+    let host = RemoteHost(alias: "mbp", username: "lmjiang")
+    let base = Worktree(
+      id: "/home/lmjiang/proj/feature",
+      name: "feature",
+      detail: "feature",
+      workingDirectory: URL(fileURLWithPath: "/home/lmjiang/proj/feature"),
+      repositoryRootURL: URL(fileURLWithPath: "/home/lmjiang/proj")
+    )
+    let rekeyed = RepositoriesFeature.remoteWorktree(from: base, host: host)
+    #expect(rekeyed.host?.sshDestination == "lmjiang@mbp")
+    #expect(rekeyed.id == "lmjiang@mbp:/home/lmjiang/proj/feature")
+    #expect(rekeyed.name == "feature")
+    #expect(rekeyed.workingDirectory == base.workingDirectory)
+  }
+
+  @Test func remoteMainWorktreeIsGitMainWithHost() {
     let config = RemoteRepositoryConfig(
-      host: RemoteHost(alias: "mbp", username: "lmjiang"),
-      remotePath: "/home/lmjiang/proj",
+      host: RemoteHost(alias: "mbp"),
+      remotePath: "/home/me/proj",
       displayName: "proj"
     )
-    let repos = RepositoriesFeature.synthesizeRemoteRepositories([config])
-    #expect(repos.count == 1)
-    let repo = repos[0]
-    #expect(repo.isGitRepository == false)
-    #expect(repo.host?.sshDestination == "lmjiang@mbp")
-    #expect(repo.id == RepositoriesFeature.remoteRepositoryID(for: config))
-    // The single synthetic worktree carries the host so the terminal goes SSH.
-    #expect(repo.worktrees.count == 1)
-    let worktree = repo.worktrees.elements[0]
-    #expect(worktree.host?.sshDestination == "lmjiang@mbp")
-    #expect(worktree.id == RepositoriesFeature.remoteWorktreeID(for: config))
-    #expect(worktree.workingDirectory.path(percentEncoded: false) == "/home/lmjiang/proj")
-  }
-
-  @Test func hostKeyedIDsAvoidCollisionWithLocalPath() {
-    // A remote repo at the same path as a local one must not share an id.
-    let config = RemoteRepositoryConfig(host: RemoteHost(alias: "mbp"), remotePath: "/tmp/repo", displayName: "repo")
-    let repoID = RepositoriesFeature.remoteRepositoryID(for: config)
-    #expect(repoID != "/tmp/repo")
-    #expect(repoID.hasPrefix("remote:"))
-  }
-
-  @Test func deDupesByRepositoryID() {
-    let config = RemoteRepositoryConfig(host: RemoteHost(alias: "mbp"), remotePath: "/home/me/proj", displayName: "a")
-    // Same (host, path), different display name / id → one synthesized repo.
-    let dup = RemoteRepositoryConfig(host: RemoteHost(alias: "mbp"), remotePath: "/home/me/proj/", displayName: "b")
-    let repos = RepositoriesFeature.synthesizeRemoteRepositories([config, dup])
-    #expect(repos.count == 1)
+    let main = RepositoriesFeature.remoteMainWorktree(config: config)
+    #expect(main.host?.sshDestination == "mbp")
+    // workingDirectory == repositoryRootURL → classifies as the git main worktree.
+    #expect(main.workingDirectory == main.repositoryRootURL)
+    #expect(main.id == "mbp:/home/me/proj")
   }
 }
 
@@ -97,6 +103,17 @@ struct RemoteSidebarPartitionTests {
     )
   }
 
+  private func remoteRepository(config: RemoteRepositoryConfig) -> Repository {
+    Repository(
+      id: RepositoriesFeature.remoteRepositoryID(for: config),
+      rootURL: URL(fileURLWithPath: config.normalizedRemotePath),
+      name: config.resolvedDisplayName,
+      worktrees: IdentifiedArray(uniqueElements: [RepositoriesFeature.remoteMainWorktree(config: config)]),
+      isGitRepository: true,
+      host: config.host
+    )
+  }
+
   private func makeState(repositories: [Repository]) -> RepositoriesFeature.State {
     var state = RepositoriesFeature.State(reconciledRepositories: repositories)
     state.isInitialLoadComplete = true
@@ -109,21 +126,20 @@ struct RemoteSidebarPartitionTests {
       remotePath: "/home/me/proj",
       displayName: "proj"
     )
-    let remote = RepositoriesFeature.synthesizeRemoteRepositories([config])
-    let state = makeState(repositories: [localRepository()] + remote)
+    let state = makeState(repositories: [localRepository(), remoteRepository(config: config)])
 
     let structure = state.computeSidebarStructure(groupPinned: false, groupActive: false)
     let ids = structure.sections.map(\.id)
 
     #expect(ids.contains(.partitionHeader(.local)))
     #expect(ids.contains(.partitionHeader(.remote)))
-    // The remote repo renders as a folder section under the remote partition.
+    // The remote repo renders as a git repository section under the remote partition.
     let remoteRepoID = RepositoriesFeature.remoteRepositoryID(for: config)
-    let hasRemoteFolder = structure.sections.contains { section in
-      if case .folder(let repositoryID, _) = section { return repositoryID == remoteRepoID }
+    let hasRemoteRepoSection = structure.sections.contains { section in
+      if case .repository(let repositoryID, _) = section { return repositoryID == remoteRepoID }
       return false
     }
-    #expect(hasRemoteFolder)
+    #expect(hasRemoteRepoSection)
 
     // Local header precedes the remote header.
     let localIndex = ids.firstIndex(of: .partitionHeader(.local))

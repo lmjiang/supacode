@@ -75,4 +75,60 @@ struct GitClientRemoteSSHTests {
     #expect(wrapped.contains("origin/main"))
     #expect(wrapped.contains("swift-otter"))
   }
+
+  @Test func parseWorktreePorcelainParsesBranchDetachedAndSkipsBare() {
+    let output = """
+      bare
+
+      worktree /repo
+      HEAD aaa
+      branch refs/heads/main
+
+      worktree /repo/wt-feature
+      HEAD bbb
+      branch refs/heads/feature
+
+      worktree /repo/wt-detached
+      HEAD ccc
+      detached
+      """
+    let worktrees = GitClient.parseWorktreePorcelain(output, repositoryRootURL: URL(fileURLWithPath: "/repo"))
+    // The leading `bare` block is skipped.
+    #expect(worktrees.count == 3)
+    #expect(worktrees[0].name == "main")
+    #expect(worktrees[0].isAttached)
+    #expect(worktrees[1].name == "feature")
+    #expect(worktrees[1].id == "/repo/wt-feature")
+    // Detached worktree: not attached, name falls back to the dir leaf.
+    #expect(worktrees[2].isAttached == false)
+    #expect(worktrees[2].name == "wt-detached")
+    // Remote paths aren't stat'd locally.
+    #expect(worktrees.allSatisfy { !$0.isMissing })
+  }
+
+  @Test func gitWorktreesOverSSHRunsPorcelainListAndParses() async throws {
+    let recorder = GitShellInvocationRecorder()
+    let base = ShellClient(
+      run: { exe, args, cwd in
+        recorder.record(executableURL: exe, arguments: args, currentDirectoryURL: cwd)
+        return ShellOutput(stdout: "worktree /repo\nHEAD abc\nbranch refs/heads/main\n", stderr: "", exitCode: 0)
+      },
+      runLoginImpl: { _, _, _, _ in ShellOutput(stdout: "", stderr: "", exitCode: 0) }
+    )
+    let client = GitClient(shell: .ssh(host: RemoteHost(alias: "mbp"), base: base))
+
+    let worktrees = try await client.gitWorktrees(for: URL(fileURLWithPath: "/repo"))
+    #expect(worktrees.count == 1)
+    #expect(worktrees[0].name == "main")
+
+    // The wire command is `ssh mbp 'exec "$SHELL" -l -c …git worktree list --porcelain…'`.
+    let snapshot = recorder.snapshot()
+    #expect(snapshot.executableURL == URL(fileURLWithPath: "/usr/bin/ssh"))
+    let wrapped = snapshot.arguments.last ?? ""
+    #expect(wrapped.hasPrefix("exec \"$SHELL\" -l -c "))
+    #expect(wrapped.contains("git"))
+    #expect(wrapped.contains("worktree"))
+    #expect(wrapped.contains("list"))
+    #expect(wrapped.contains("--porcelain"))
+  }
 }
