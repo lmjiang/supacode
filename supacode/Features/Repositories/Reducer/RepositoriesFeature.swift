@@ -249,6 +249,8 @@ struct RepositoriesFeature {
     /// the view reads to assign ⌃1..⌃0 hotkeys).
     case sidebarNestByBranchChanged
     case setOpenPanelPresented(Bool)
+    case addRemoteRepository(RemoteRepositoryConfig)
+    case removeRemoteRepository(RemoteRepositoryConfig.ID)
     case loadPersistedRepositories
     case refreshWorktrees
     case reloadRepositories(animated: Bool)
@@ -512,6 +514,29 @@ struct RepositoriesFeature {
       case .setOpenPanelPresented(let isPresented):
         state.isOpenPanelPresented = isPresented
         return .none
+
+      case .addRemoteRepository(let config):
+        @Shared(.settingsFile) var settingsFile
+        $settingsFile.withLock { settings in
+          // De-dupe on (host, path) so re-adding the same remote is a no-op.
+          let exists = settings.global.remoteRepositories.contains {
+            $0.host.sshDestination == config.host.sshDestination
+              && $0.normalizedRemotePath == config.normalizedRemotePath
+          }
+          if !exists {
+            settings.global.remoteRepositories.append(config)
+          }
+        }
+        // Full reload so the new remote repo materializes even when there are
+        // no local roots (`reloadRepositories` early-returns on empty roots).
+        return .send(.loadPersistedRepositories)
+
+      case .removeRemoteRepository(let id):
+        @Shared(.settingsFile) var settingsFile
+        $settingsFile.withLock { settings in
+          settings.global.remoteRepositories.removeAll { $0.id == id }
+        }
+        return .send(.loadPersistedRepositories)
 
       case .loadPersistedRepositories:
         state.alert = nil
@@ -2388,7 +2413,7 @@ struct RepositoriesFeature {
         // Drop persisted customization so re-adding the same path doesn't
         // silently restore the old title/color, matching the healthy-repo path.
         state.$sidebar.withLock { sidebar in
-          sidebar.sections.removeValue(forKey: repositoryID)
+          _ = sidebar.sections.removeValue(forKey: repositoryID)
         }
         state.dropStaleFailedRepositorySelection()
         return .run { send in
@@ -3829,7 +3854,11 @@ struct RepositoriesFeature {
         loaded.append(repository)
       }
     }
-    return (loaded, failures)
+    // Remote repositories are appended on every load path (they don't live in
+    // `repositoryRoots`, so `reload`/`open`/removal would otherwise drop them).
+    // Their host-keyed ids never collide with the local `loaded` set.
+    let remoteRepositories = Self.synthesizeRemoteRepositories(Self.persistedRemoteRepositoryConfigs())
+    return (loaded + remoteRepositories, failures)
   }
 
   /// Customization transfer record produced by `prunedPendingWorktrees` and

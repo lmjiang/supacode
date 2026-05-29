@@ -7,6 +7,7 @@ struct SidebarView: View {
   @Bindable var store: StoreOf<RepositoriesFeature>
   let terminalManager: WorktreeTerminalManager
   @Shared(.settingsFile) private var settingsFile
+  @State private var isAddRemotePresented = false
 
   var body: some View {
     let state = store.state
@@ -38,8 +39,19 @@ struct SidebarView: View {
     )
     .toolbar {
       ToolbarItem(placement: .primaryAction) {
-        Button {
-          store.send(.setOpenPanelPresented(true))
+        Menu {
+          Button {
+            store.send(.setOpenPanelPresented(true))
+          } label: {
+            Label("Repository or Folder…", systemImage: "folder.badge.plus")
+          }
+          .help("Add a local repository or folder (\(openRepo?.display ?? "none"))")
+          Button {
+            isAddRemotePresented = true
+          } label: {
+            Label("Remote Repository…", systemImage: "network")
+          }
+          .help("Add a repository on an SSH host")
         } label: {
           Label {
             Text("Add…")
@@ -49,8 +61,14 @@ struct SidebarView: View {
               .accessibilityHidden(true)
           }
         }
+        .menuIndicator(.hidden)
         .labelStyle(.iconOnly)
-        .help("Add Repository or Folder (\(openRepo?.display ?? "none"))")
+        .help("Add Repository, Folder, or Remote")
+      }
+    }
+    .sheet(isPresented: $isAddRemotePresented) {
+      AddRemoteRepositorySheet { config in
+        store.send(.addRemoteRepository(config))
       }
     }
     .focusedSceneAction(

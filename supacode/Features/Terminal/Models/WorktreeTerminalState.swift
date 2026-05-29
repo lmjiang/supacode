@@ -1447,14 +1447,31 @@ final class WorktreeTerminalState {
     let sessionID = ZmxSessionID.make(surfaceID: surfaceID)
     // Remote worktree: launch zmx on the host over SSH. zmx is authoritative for
     // attach-vs-create remotely just as it is locally, so the surface command is
-    // always the remote attach line (no local budget probe / bundle path).
+    // always the remote attach line (no local budget probe / bundle path). When
+    // the caller has no explicit command, default to cd-into-the-remote-dir so a
+    // freshly created session lands in the project directory.
     if let host = worktree.host {
-      return (ZmxAttach.buildRemoteCommand(host: host, sessionID: sessionID, userCommand: command), initialInput)
+      let userCommand =
+        command
+        ?? Self.remoteDefaultShellCommand(remotePath: worktree.workingDirectory.path(percentEncoded: false))
+      return (ZmxAttach.buildRemoteCommand(host: host, sessionID: sessionID, userCommand: userCommand), initialInput)
     }
     guard let wrapped = zmxClient.wrapCommand(sessionID, command) else {
       return (command, initialInput)
     }
     return (wrapped, initialInput)
+  }
+
+  /// Default command for a remote worktree surface with no explicit command:
+  /// `cd` into the remote project dir, then exec a login shell. The `cd` failure
+  /// is swallowed so a stale path still drops the user into a usable shell. Nil
+  /// for an empty/root path so we just attach the default shell. The path is
+  /// single-quoted for the remote shell (which re-parses the attach string).
+  static func remoteDefaultShellCommand(remotePath: String) -> String? {
+    let trimmed = remotePath.trimmingCharacters(in: .whitespacesAndNewlines)
+    guard !trimmed.isEmpty, trimmed != "/" else { return nil }
+    let quoted = "'" + trimmed.replacing("'", with: "'\\''") + "'"
+    return "cd \(quoted) 2>/dev/null; exec \"$SHELL\" -l"
   }
 
   private struct InheritedSurfaceConfig: Equatable {

@@ -144,7 +144,7 @@ struct SidebarListView: View {
         if let repoIndex = repoIDs.firstIndex(of: repositoryID) {
           repoOffsets.insert(repoIndex)
         }
-      case .highlight, .placeholder:
+      case .highlight, .partitionHeader, .placeholder:
         continue
       }
     }
@@ -160,8 +160,8 @@ struct SidebarListView: View {
         .folder(let repositoryID, _),
         .failedRepository(let repositoryID, _, _, _):
         repoDestination = repoIDs.firstIndex(of: repositoryID) ?? repoIDs.count
-      case .highlight, .placeholder:
-        // Dropping above the highlight prefix collapses to "before the first repo".
+      case .highlight, .partitionHeader, .placeholder:
+        // Dropping above the highlight / partition prefix collapses to "before the first repo".
         repoDestination = 0
       }
     }
@@ -212,6 +212,9 @@ private struct SidebarSectionDispatcher: View {
         shortcutHintByID: shortcutHintByID
       )
       .moveDisabled(true)
+    case .partitionHeader(let kind):
+      SidebarPartitionHeaderView(kind: kind)
+        .moveDisabled(true)
     case .failedRepository(let repositoryID, let rootURL, let customTitle, let color):
       SidebarFailedRepositorySection(
         repositoryID: repositoryID,
@@ -387,6 +390,30 @@ private struct SidebarFailedRepositorySection: View {
       }
       .menuStyle(.secondaryToolbar)
     }
+  }
+}
+
+// MARK: - Local / Remote partition header.
+
+/// Standalone, non-selectable divider row that separates the Local and Remote
+/// repository groups. Only emitted by `SidebarStructure` when remote repos
+/// exist, so a purely-local sidebar never shows it.
+private struct SidebarPartitionHeaderView: View {
+  let kind: SidebarStructure.RepositoryLocality
+
+  var body: some View {
+    Label {
+      Text(kind.title)
+        .font(.caption.weight(.semibold))
+        .textCase(.uppercase)
+    } icon: {
+      Image(systemName: kind == .remote ? "network" : "desktopcomputer")
+        .accessibilityHidden(true)
+    }
+    .foregroundStyle(.secondary)
+    .listRowSeparator(.hidden)
+    .selectionDisabled()
+    .accessibilityAddTraits(.isHeader)
   }
 }
 
