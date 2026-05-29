@@ -179,3 +179,46 @@ struct RemoteDefaultShellCommandTests {
     #expect(WorktreeTerminalState.remoteDefaultShellCommand(remotePath: "   ") == nil)
   }
 }
+
+@MainActor
+struct RemoteWorktreeInfoTests {
+  private func remoteRepository(config: RemoteRepositoryConfig) -> (Repository, Worktree) {
+    let worktree = RepositoriesFeature.remoteMainWorktree(config: config)
+    let repository = Repository(
+      id: RepositoriesFeature.remoteRepositoryID(for: config),
+      rootURL: URL(fileURLWithPath: config.normalizedRemotePath),
+      name: config.resolvedDisplayName,
+      worktrees: IdentifiedArray(uniqueElements: [worktree]),
+      isGitRepository: true,
+      host: config.host
+    )
+    return (repository, worktree)
+  }
+
+  /// PR refresh runs `gh` against a local checkout, which a remote-only repo
+  /// doesn't have, so the reducer must short-circuit to `.none`.
+  @Test func pullRequestRefreshSkippedForRemoteRepository() async {
+    let config = RemoteRepositoryConfig(
+      host: RemoteHost(alias: "mbp"),
+      remotePath: "/home/me/proj",
+      displayName: "proj"
+    )
+    let (repository, worktree) = remoteRepository(config: config)
+    var state = RepositoriesFeature.State(reconciledRepositories: [repository])
+    state.isInitialLoadComplete = true
+
+    let store = TestStore(initialState: state) {
+      RepositoriesFeature()
+    } withDependencies: {
+      $0.sidebarStructureAutoRecompute = false
+    }
+
+    // No state change and no effects: the host guard returns before any `gh`
+    // work, so an exhaustive TestStore send with no trailing closure passes.
+    await store.send(
+      .worktreeInfoEvent(
+        .repositoryPullRequestRefresh(repositoryRootURL: repository.rootURL, worktreeIDs: [worktree.id])
+      )
+    )
+  }
+}

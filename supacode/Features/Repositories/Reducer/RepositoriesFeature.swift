@@ -478,6 +478,15 @@ struct RepositoriesFeature {
   @Dependency(\.date.now) private var now
   @Dependency(\.uuid) private var uuid
 
+  /// Host-aware git client: the SSH flavor for a remote worktree (so branch /
+  /// diff lookups run on the host), the injected local client otherwise.
+  private func gitClient(for worktree: Worktree) -> GitClientDependency {
+    guard let host = worktree.host else {
+      return gitClient
+    }
+    return .ssh(host: host)
+  }
+
   var body: some Reducer<State, Action> {
     Reduce { state, action in
       switch action {
@@ -2851,7 +2860,7 @@ struct RepositoriesFeature {
             return .none
           }
           let worktreeURL = worktree.workingDirectory
-          let gitClient = gitClient
+          let gitClient = gitClient(for: worktree)
           return .run { send in
             if let name = await gitClient.branchName(worktreeURL) {
               await send(.worktreeBranchNameLoaded(worktreeID: worktreeID, name: name))
@@ -2862,7 +2871,7 @@ struct RepositoriesFeature {
             return .none
           }
           let worktreeURL = worktree.workingDirectory
-          let gitClient = gitClient
+          let gitClient = gitClient(for: worktree)
           return .run { send in
             if let changes = await gitClient.lineChanges(worktreeURL) {
               await send(
@@ -2879,6 +2888,11 @@ struct RepositoriesFeature {
           guard let firstWorktree = worktrees.first,
             let repositoryID = state.repositoryID(containing: firstWorktree.id)
           else {
+            return .none
+          }
+          // PR refresh runs `gh` against the local repo; a remote-only repo has
+          // no local checkout to serve it. Skip (gh-over-ssh is out of scope).
+          guard state.repositories[id: repositoryID]?.host == nil else {
             return .none
           }
           var seen = Set<String>()

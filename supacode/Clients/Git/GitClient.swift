@@ -15,6 +15,7 @@ enum GitOperation: String {
   case branchRefs = "branch_refs"
   case defaultRemoteBranchRef = "default_remote_branch_ref"
   case localHeadRef = "local_head_ref"
+  case symbolicHeadRef = "symbolic_head_ref"
   case ignoredFileCount = "ignored_file_count"
   case untrackedFileCount = "untracked_file_count"
   case branchDelete = "branch_delete"
@@ -673,34 +674,23 @@ struct GitClient {
     return arguments
   }
 
-  nonisolated func branchName(for worktreeURL: URL) async -> String? {
-    let headURL = await MainActor.run {
-      GitWorktreeHeadResolver.headURL(
-        for: worktreeURL,
-        fileManager: .default
-      )
-    }
-    guard let headURL else {
-      return nil
-    }
+  /// Resolve the current branch via `git rev-parse --abbrev-ref HEAD` so it
+  /// works over any transport (local or SSH). Returns the short branch name,
+  /// `"HEAD"` for a detached head, or `nil` on error (not a repo / unreachable
+  /// host). Replaces the former local-HEAD-file read, which couldn't resolve a
+  /// remote worktree's branch.
+  nonisolated func symbolicHeadBranch(at worktreeURL: URL) async -> String? {
+    let path = worktreeURL.path(percentEncoded: false)
     guard
-      let line = try? String(contentsOf: headURL, encoding: .utf8)
-        .split(whereSeparator: \.isNewline)
-        .first
+      let output = try? await runGit(
+        operation: .symbolicHeadRef,
+        arguments: ["-C", path, "rev-parse", "--abbrev-ref", "HEAD"]
+      )
     else {
       return nil
     }
-    let trimmed = line.trimmingCharacters(in: .whitespacesAndNewlines)
-    let refPrefix = "ref:"
-    if trimmed.hasPrefix(refPrefix) {
-      let ref = trimmed.dropFirst(refPrefix.count).trimmingCharacters(in: .whitespaces)
-      let headsPrefix = "refs/heads/"
-      if ref.hasPrefix(headsPrefix) {
-        return String(ref.dropFirst(headsPrefix.count))
-      }
-      return String(ref)
-    }
-    return "HEAD"
+    let trimmed = output.trimmingCharacters(in: .whitespacesAndNewlines)
+    return trimmed.isEmpty ? nil : trimmed
   }
 
   nonisolated func lineChanges(at worktreeURL: URL) async -> (added: Int, removed: Int)? {
