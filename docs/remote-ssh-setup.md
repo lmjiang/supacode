@@ -191,3 +191,61 @@ through the sidebar, and remote repos are visually separated from local ones.
   no per-remote customization, no remote git worktree discovery/creation.
 - `isGitRepository` / `rootDirectoryExists` still probe the local filesystem;
   remote repos are folder-kind so they don't hit that path.
+
+## 4. Unified add-repo entry + remote agent-hook channel
+
+### Unified "add repository" entry points
+
+Adding a remote repo used to be reachable only from the sidebar toolbar menu.
+It now mirrors the local "Open Repository or Folder" flow across all three entry
+points, all routed through reducer state so they can be presented from anywhere:
+
+- New action `RepositoriesFeature.setAddRemoteRepositoryPresented(Bool)` drives
+  `State.isAddRemoteRepositoryPresented`; `SidebarView` binds the
+  `AddRemoteRepositorySheet` to it.
+- **Command palette** — `Add Remote Repository`
+  (`CommandPaletteItem.Kind.addRemoteRepository` →
+  `Delegate.addRemoteRepository`), routed in `AppFeature` to
+  `setAddRemoteRepositoryPresented(true)`.
+- **Empty state** — a secondary `Add Remote Repository…` link next to
+  `Open Repository or Folder…`.
+- **Sidebar toolbar** — the existing `Add… → Remote Repository…` button now
+  dispatches the action instead of toggling a local `@State`.
+
+### Remote agent-hook channel (awaiting-input badge over SSH)
+
+The orange "awaiting input" badge is driven by a coding agent's hook writing a
+JSON envelope to the **local** Unix socket at `$SUPACODE_SOCKET_PATH`
+(`AgentHookSocketServer`), keyed by `$SUPACODE_SURFACE_ID`. For a local surface
+both vars are in the spawned shell's environment, so it just works. For a remote
+surface the shell runs on the host — neither var is forwarded, and a local Unix
+socket isn't reachable across SSH — so the badge never lit.
+
+The remote attach command now sets up the channel
+(`ZmxAttach.buildRemoteCommand` → `SSHCommand.commandLine(reverseSocketForward:)`):
+
+1. The remote command exports `SUPACODE_SURFACE_ID` (always) and
+   `SUPACODE_SOCKET_PATH` (a per-surface remote path,
+   `ZmxAttach.remoteAgentHookSocketPath`) before `zmx attach`.
+2. `ssh -R <remoteSocket>:<localSocket> -o StreamLocalBindUnlink=yes` reverse-
+   forwards that remote socket to the local `AgentHookSocketServer` socket, so a
+   remote `nc -U "$SUPACODE_SOCKET_PATH"` reaches the local server and lights the
+   badge for the right surface.
+
+**Prerequisites / known limitations (verify on a real host):**
+
+- **The remote agent must have Supacode's hook installed.** `ClaudeSettingsInstaller`
+  writes the hook into the *local* `~/.claude/settings.json`; the remote host's
+  `~/.claude/settings.json` is untouched. Until the same hook is installed on the
+  remote (writing remote config is a deliberate, not-yet-automated side effect),
+  remote Claude won't emit the `awaiting_input` envelope and the badge stays dark
+  even with the channel wired. This is the remaining end-to-end gap.
+- **SSH ControlMaster interaction.** Reverse forwards bind to the connection that
+  opens the shared master (`ControlPath=~/.ssh/supacode-%C`). If a `-R`-less git
+  call opened the master first, the terminal's `-R` is dropped until the master
+  is re-established. A dedicated control path for the terminal connection (at the
+  cost of a second auth/FIDO touch) is the clean fix if this proves flaky.
+- Requires **OpenSSH ≥ 6.7** on both ends for Unix-domain socket forwarding.
+- Real-host SSH + libghostty rendering remain verified manually (FIDO touch),
+  not in CI/tests; the command construction is unit-tested in
+  `RemoteSSHCommandTests`.

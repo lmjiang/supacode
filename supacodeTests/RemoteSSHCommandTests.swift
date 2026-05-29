@@ -115,58 +115,102 @@ struct SSHCommandTests {
 }
 
 struct ZmxAttachRemoteTests {
-  @Test func remoteAttachCommandWithoutUserCommandIsAttachOnly() {
-    #expect(ZmxAttach.remoteAttachCommand(sessionID: "supa-x", userCommand: nil) == "zmx attach supa-x")
+  private let surfaceID = UUID(uuidString: "00000000-0000-0000-0000-0000000000AB")!
+  private var surfacePrelude: String { "export SUPACODE_SURFACE_ID='\(surfaceID.uuidString)'; " }
+
+  @Test func remoteAttachCommandWithoutUserCommandExportsSurfaceThenAttaches() {
+    #expect(
+      ZmxAttach.remoteAttachCommand(sessionID: "supa-x", userCommand: nil, surfaceID: surfaceID, remoteSocketPath: nil)
+        == surfacePrelude + "zmx attach supa-x"
+    )
+  }
+
+  @Test func remoteAttachCommandExportsSocketPathWhenForwarded() {
+    #expect(
+      ZmxAttach.remoteAttachCommand(
+        sessionID: "supa-x",
+        userCommand: nil,
+        surfaceID: surfaceID,
+        remoteSocketPath: "/tmp/hook.sock"
+      ) == surfacePrelude + "export SUPACODE_SOCKET_PATH='/tmp/hook.sock'; zmx attach supa-x"
+    )
   }
 
   @Test func remoteAttachCommandIgnoresWhitespaceUserCommand() {
-    #expect(ZmxAttach.remoteAttachCommand(sessionID: "supa-x", userCommand: "  \n") == "zmx attach supa-x")
+    #expect(
+      ZmxAttach.remoteAttachCommand(
+        sessionID: "supa-x",
+        userCommand: "  \n",
+        surfaceID: surfaceID,
+        remoteSocketPath: nil
+      ) == surfacePrelude + "zmx attach supa-x"
+    )
   }
 
   @Test func remoteAttachCommandWrapsUserCommandViaShellC() {
     #expect(
-      ZmxAttach.remoteAttachCommand(sessionID: "supa-x", userCommand: "claude --resume")
-        == "zmx attach supa-x /bin/sh -c 'claude --resume'"
+      ZmxAttach.remoteAttachCommand(
+        sessionID: "supa-x",
+        userCommand: "claude --resume",
+        surfaceID: surfaceID,
+        remoteSocketPath: nil
+      ) == surfacePrelude + "zmx attach supa-x /bin/sh -c 'claude --resume'"
     )
   }
 
-  @Test func buildRemoteCommandComposesCommandLineWithRemoteAttach() {
+  @Test func buildRemoteCommandWithoutSocketHasNoReverseForward() {
     let host = RemoteHost(alias: "mbp")
-    let command = ZmxAttach.buildRemoteCommand(host: host, sessionID: "supa-deadbeef", userCommand: nil)
+    let command = ZmxAttach.buildRemoteCommand(
+      host: host,
+      sessionID: "supa-deadbeef",
+      userCommand: nil,
+      surfaceID: surfaceID,
+      localSocketPath: nil
+    )
     #expect(
       command
         == SSHCommand.commandLine(
           host: host,
-          remoteCommand: ZmxAttach.remoteAttachCommand(sessionID: "supa-deadbeef", userCommand: nil)
+          remoteCommand: ZmxAttach.remoteAttachCommand(
+            sessionID: "supa-deadbeef",
+            userCommand: nil,
+            surfaceID: surfaceID,
+            remoteSocketPath: nil
+          )
         )
     )
-    // Login-shell wrapped, and carries the attach.
     #expect(command.contains("exec "))
     #expect(command.contains("zmx attach supa-deadbeef"))
+    #expect(!command.contains("-R "))
   }
 
-  @Test func buildRemoteCommandWithUserCommandComposesCommandLine() {
+  @Test func buildRemoteCommandWithSocketAddsReverseForwardAndExportsSocket() {
     let host = RemoteHost(alias: "mbp")
-    let command = ZmxAttach.buildRemoteCommand(host: host, sessionID: "supa-x", userCommand: "claude")
-    #expect(
-      command
-        == SSHCommand.commandLine(
-          host: host,
-          remoteCommand: ZmxAttach.remoteAttachCommand(sessionID: "supa-x", userCommand: "claude")
-        )
+    let command = ZmxAttach.buildRemoteCommand(
+      host: host,
+      sessionID: "supa-x",
+      userCommand: "claude",
+      surfaceID: surfaceID,
+      localSocketPath: "/var/folders/local-hook.sock"
     )
+    let remoteSocket = ZmxAttach.remoteAgentHookSocketPath(surfaceID: surfaceID)
+    // Reverse-forwards the remote per-surface socket to the local hook socket.
+    #expect(command.contains("-o StreamLocalBindUnlink=yes"))
+    #expect(command.contains("-R '\(remoteSocket):/var/folders/local-hook.sock'"))
+    // The remote shell learns the forwarded socket path.
+    #expect(command.contains("SUPACODE_SOCKET_PATH="))
+    #expect(command.contains(remoteSocket))
   }
 
   @Test func buildRemoteCommandForwardsUsernameAndPort() {
     let host = RemoteHost(alias: "box", username: "lmjiang", port: 2222)
-    let command = ZmxAttach.buildRemoteCommand(host: host, sessionID: "supa-x", userCommand: nil)
-    #expect(command.contains("-p 2222 lmjiang@box "))
-    #expect(
-      command
-        == SSHCommand.commandLine(
-          host: host,
-          remoteCommand: ZmxAttach.remoteAttachCommand(sessionID: "supa-x", userCommand: nil)
-        )
+    let command = ZmxAttach.buildRemoteCommand(
+      host: host,
+      sessionID: "supa-x",
+      userCommand: nil,
+      surfaceID: surfaceID,
+      localSocketPath: nil
     )
+    #expect(command.contains("-p 2222 lmjiang@box "))
   }
 }

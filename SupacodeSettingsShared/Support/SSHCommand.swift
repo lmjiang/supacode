@@ -100,12 +100,24 @@ public nonisolated enum SSHCommand {
     host: RemoteHost,
     remoteCommand: String,
     allocateTTY: Bool = true,
-    controlPath: String = defaultControlPath
+    controlPath: String = defaultControlPath,
+    reverseSocketForward: (remote: String, local: String)? = nil
   ) -> String {
     var tokens = [sshExecutablePath]
     tokens += controlOptions(controlPath: controlPath)
     if allocateTTY {
       tokens.append("-tt")
+    }
+    if let forward = reverseSocketForward {
+      // Reverse-forward a remote Unix socket to the local agent-hook socket so a
+      // coding agent's hook on the host can reach `SUPACODE_SOCKET_PATH` and
+      // light the local awaiting-input badge. `StreamLocalBindUnlink=yes` clears
+      // a stale bind left by a crashed session so the rebind succeeds. NOTE:
+      // forwards bind to the connection that opens the master — if a `-R`-less
+      // git connection already established the shared master, this is dropped
+      // until the master is re-established. Requires OpenSSH >= 6.7.
+      tokens += ["-o", "StreamLocalBindUnlink=yes"]
+      tokens += ["-R", shellQuote("\(forward.remote):\(forward.local)")]
     }
     tokens += host.sshOptionArguments
     tokens.append(host.sshDestination)

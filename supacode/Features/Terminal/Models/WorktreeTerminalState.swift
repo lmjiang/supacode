@@ -1454,7 +1454,16 @@ final class WorktreeTerminalState {
       let userCommand =
         command
         ?? Self.remoteDefaultShellCommand(remotePath: worktree.workingDirectory.path(percentEncoded: false))
-      return (ZmxAttach.buildRemoteCommand(host: host, sessionID: sessionID, userCommand: userCommand), initialInput)
+      return (
+        ZmxAttach.buildRemoteCommand(
+          host: host,
+          sessionID: sessionID,
+          userCommand: userCommand,
+          surfaceID: surfaceID,
+          localSocketPath: socketPath
+        ),
+        initialInput
+      )
     }
     guard let wrapped = zmxClient.wrapCommand(sessionID, command) else {
       return (command, initialInput)
