@@ -221,4 +221,21 @@ struct RemoteWorktreeInfoTests {
       )
     )
   }
+
+  /// The remote-add sheet is now reducer-driven so the command palette and
+  /// empty-state entry points can present it, not just the toolbar.
+  @Test func setAddRemoteRepositoryPresentedTogglesState() async {
+    let store = TestStore(initialState: RepositoriesFeature.State()) {
+      RepositoriesFeature()
+    } withDependencies: {
+      $0.sidebarStructureAutoRecompute = false
+    }
+
+    await store.send(.setAddRemoteRepositoryPresented(true)) {
+      $0.isAddRemoteRepositoryPresented = true
+    }
+    await store.send(.setAddRemoteRepositoryPresented(false)) {
+      $0.isAddRemoteRepositoryPresented = false
+    }
+  }
 }

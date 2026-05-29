@@ -89,6 +89,7 @@ struct RepositoriesFeature {
     var loadFailuresByID: [Repository.ID: String] = [:]
     var selection: SidebarSelection?
     var isOpenPanelPresented = false
+    var isAddRemoteRepositoryPresented = false
     var isInitialLoadComplete = false
     var pendingWorktrees: [PendingWorktree] = []
     /// In-flight customization payloads, keyed by `(repositoryID, branchName)`
@@ -249,6 +250,7 @@ struct RepositoriesFeature {
     /// the view reads to assign ⌃1..⌃0 hotkeys).
     case sidebarNestByBranchChanged
     case setOpenPanelPresented(Bool)
+    case setAddRemoteRepositoryPresented(Bool)
     case addRemoteRepository(RemoteRepositoryConfig)
     case removeRemoteRepository(Repository.ID)
     case loadPersistedRepositories
@@ -522,6 +524,10 @@ struct RepositoriesFeature {
 
       case .setOpenPanelPresented(let isPresented):
         state.isOpenPanelPresented = isPresented
+        return .none
+
+      case .setAddRemoteRepositoryPresented(let isPresented):
+        state.isAddRemoteRepositoryPresented = isPresented
         return .none
 
       case .addRemoteRepository(let config):

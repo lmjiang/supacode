@@ -7,7 +7,6 @@ struct SidebarView: View {
   @Bindable var store: StoreOf<RepositoriesFeature>
   let terminalManager: WorktreeTerminalManager
   @Shared(.settingsFile) private var settingsFile
-  @State private var isAddRemotePresented = false
 
   var body: some View {
     let state = store.state
@@ -47,7 +46,7 @@ struct SidebarView: View {
           }
           .help("Add a local repository or folder (\(openRepo?.display ?? "none"))")
           Button {
-            isAddRemotePresented = true
+            store.send(.setAddRemoteRepositoryPresented(true))
           } label: {
             Label("Remote Repository…", systemImage: "network")
           }
@@ -66,7 +65,9 @@ struct SidebarView: View {
         .help("Add Repository, Folder, or Remote")
       }
     }
-    .sheet(isPresented: $isAddRemotePresented) {
+    .sheet(
+      isPresented: $store.isAddRemoteRepositoryPresented.sending(\.setAddRemoteRepositoryPresented)
+    ) {
       AddRemoteRepositorySheet { config in
         store.send(.addRemoteRepository(config))
       }
