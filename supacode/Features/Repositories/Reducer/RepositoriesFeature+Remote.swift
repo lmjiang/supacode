@@ -99,4 +99,59 @@ extension RepositoriesFeature {
       host: config.host
     )
   }
+
+  /// Remote worktree creation: pick a name (excluding remote branches), run
+  /// `git worktree add` over ssh, then reload to re-list. Bypasses the local
+  /// pending/stream flow. `baseRef` is the remote HEAD and the new worktree
+  /// lands beside the repo root (`<parent>/<name>`), so no parent dir needs to
+  /// be created first.
+  func remoteCreateWorktree(
+    repository: Repository,
+    host: RemoteHost,
+    nameSource: WorktreeCreationNameSource
+  ) -> Effect<Action> {
+    let repoRoot = repository.rootURL
+    let existingNames = Set(repository.worktrees.map { $0.name.lowercased() })
+    return .run { send in
+      let client = GitClient(shell: .ssh(host: host))
+      let remoteBranches = (try? await client.localBranchNames(for: repoRoot)) ?? []
+      let existing = existingNames.union(remoteBranches)
+      let name: String
+      switch nameSource {
+      case .random:
+        let generated = await MainActor.run { WorktreeNameGenerator.nextName(excluding: existing) }
+        guard let generated else {
+          await send(
+            .presentAlert(
+              title: "No available worktree names",
+              message: "All default adjective-animal names are already in use. "
+                + "Delete a worktree or rename a branch, then try again."
+            )
+          )
+          return
+        }
+        name = generated
+      case .explicit(let explicit):
+        let trimmed = explicit.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty, !trimmed.contains(where: \.isWhitespace) else {
+          await send(
+            .presentAlert(
+              title: "Branch name invalid",
+              message: "Enter a branch name without spaces to create a worktree."
+            )
+          )
+          return
+        }
+        name = trimmed
+      }
+      let worktreePath = repoRoot.deletingLastPathComponent()
+        .appending(path: name, directoryHint: .isDirectory)
+      do {
+        try await client.createGitWorktree(in: repoRoot, name: name, baseRef: "HEAD", worktreePath: worktreePath)
+        await send(.loadPersistedRepositories)
+      } catch {
+        await send(.presentAlert(title: "Unable to create worktree", message: error.localizedDescription))
+      }
+    }
+  }
 }

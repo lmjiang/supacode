@@ -305,9 +305,9 @@ private struct SidebarGitRepositorySection: View {
 private struct SidebarSectionActionsView: View {
   let repositoryID: Repository.ID
   let isRemovingRepository: Bool
-  /// Remote (SSH) repositories don't yet support worktree creation, so the
-  /// `+` is hidden for them. Remove routes to `removeRemoteRepository` inside
-  /// the reducer (no local-removal confirmation).
+  /// Remote (SSH) repositories hide the local-only "Repository Settings…" and
+  /// route Remove to `removeRemoteRepository` (drops the config; remote files
+  /// untouched). Worktree creation (`+`) works for remote repos too.
   var isRemote: Bool = false
   let store: StoreOf<RepositoriesFeature>
 
@@ -342,21 +342,19 @@ private struct SidebarSectionActionsView: View {
     }
     .menuStyle(.secondaryToolbar)
 
-    if !isRemote {
-      Button {
-        store.send(.createRandomWorktreeInRepository(repositoryID))
-      } label: {
-        Image(systemName: "plus")
-          .accessibilityLabel("New Worktree")
-          .frame(maxHeight: .infinity)
-          .contentShape(Rectangle())
-      }
-      .buttonStyle(.plain)
-      .disabled(isRemovingRepository)
-      .foregroundStyle(.secondary)
-      .help("New Worktree")
-      .padding(.trailing, 4)
+    Button {
+      store.send(.createRandomWorktreeInRepository(repositoryID))
+    } label: {
+      Image(systemName: "plus")
+        .accessibilityLabel("New Worktree")
+        .frame(maxHeight: .infinity)
+        .contentShape(Rectangle())
     }
+    .buttonStyle(.plain)
+    .disabled(isRemovingRepository)
+    .foregroundStyle(.secondary)
+    .help("New Worktree")
+    .padding(.trailing, 4)
   }
 }
 

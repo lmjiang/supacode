@@ -207,6 +207,27 @@ struct GitClient {
     return worktrees
   }
 
+  /// Create a worktree via standard `git worktree add` (for remote repos where
+  /// the bundled `wt` shim isn't available). Creates a new branch `name` at
+  /// `worktreePath` from `baseRef` (omitted → current HEAD). Throws
+  /// `GitClientError` on failure (collision, bad ref, missing parent dir).
+  /// Callers typically reload to re-list over ssh rather than build a worktree
+  /// model from this directly.
+  nonisolated func createGitWorktree(
+    in repoRoot: URL,
+    name: String,
+    baseRef: String,
+    worktreePath: URL
+  ) async throws {
+    let rootPath = repoRoot.standardizedFileURL.path(percentEncoded: false)
+    let wtPath = worktreePath.standardizedFileURL.path(percentEncoded: false)
+    var arguments = ["-C", rootPath, "worktree", "add", wtPath, "-b", name]
+    if !baseRef.isEmpty {
+      arguments.append(baseRef)
+    }
+    _ = try await runGit(operation: .worktreeCreate, arguments: arguments)
+  }
+
   // Backfill-only: never drop Supacode-owned locks here. Supacode-initiated
   // `removeWorktree` is the sole release path.
   nonisolated func reconcileSupacodeLocks(for repoRoot: URL) async {

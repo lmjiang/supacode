@@ -878,16 +878,18 @@ struct RepositoriesFeature {
           )
           return .none
         }
-        // Remote worktree creation (running `git worktree add` over ssh) is a
-        // follow-up. Until then, reject so menu / hotkey / palette paths don't
-        // fall into the local `gitClient.createWorktreeStream` against a remote
-        // path. The sidebar `+` is already hidden for remote repos.
+        // Remote repos create worktrees over ssh (`git worktree add`). Skip the
+        // local branch-loading prompt and go straight to random-name creation;
+        // `createWorktreeInRepository` runs the remote path.
         if repository.host != nil {
-          state.alert = messageAlert(
-            title: "Unable to create worktree",
-            message: "Creating worktrees on a remote repository isn't supported yet."
+          return .send(
+            .createWorktreeInRepository(
+              repositoryID: repository.id,
+              nameSource: .random,
+              baseRefSource: .repositorySetting,
+              fetchOrigin: false
+            )
           )
-          return .none
         }
         if state.removingRepositoryIDs[repository.id] != nil {
           state.alert = messageAlert(
@@ -1172,16 +1174,10 @@ struct RepositoriesFeature {
           }
           return .none
         }
-        // Remote worktree creation (running `git worktree add` over ssh) is a
-        // follow-up. Until then, reject so menu / hotkey / palette paths don't
-        // fall into the local `gitClient.createWorktreeStream` against a remote
-        // path. The sidebar `+` is already hidden for remote repos.
-        if repository.host != nil {
-          state.alert = messageAlert(
-            title: "Unable to create worktree",
-            message: "Creating worktrees on a remote repository isn't supported yet."
-          )
-          return .none
+        // Remote repos create worktrees over ssh via `git worktree add`, then
+        // reload to re-list. This bypasses the local pending/stream flow below.
+        if let host = repository.host {
+          return remoteCreateWorktree(repository: repository, host: host, nameSource: nameSource)
         }
         if state.removingRepositoryIDs[repository.id] != nil {
           state.alert = messageAlert(

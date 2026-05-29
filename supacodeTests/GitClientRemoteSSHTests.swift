@@ -76,6 +76,37 @@ struct GitClientRemoteSSHTests {
     #expect(wrapped.contains("swift-otter"))
   }
 
+  @Test func createGitWorktreeOverSSHRunsWorktreeAdd() async throws {
+    let recorder = GitShellInvocationRecorder()
+    let base = ShellClient(
+      run: { exe, args, cwd in
+        recorder.record(executableURL: exe, arguments: args, currentDirectoryURL: cwd)
+        return ShellOutput(stdout: "", stderr: "", exitCode: 0)
+      },
+      runLoginImpl: { _, _, _, _ in ShellOutput(stdout: "", stderr: "", exitCode: 0) }
+    )
+    let client = GitClient(shell: .ssh(host: RemoteHost(alias: "mbp"), base: base))
+
+    try await client.createGitWorktree(
+      in: URL(fileURLWithPath: "/repo"),
+      name: "swift-otter",
+      baseRef: "HEAD",
+      worktreePath: URL(fileURLWithPath: "/swift-otter")
+    )
+
+    let snapshot = recorder.snapshot()
+    #expect(snapshot.executableURL == URL(fileURLWithPath: "/usr/bin/ssh"))
+    let wrapped = snapshot.arguments.last ?? ""
+    #expect(wrapped.hasPrefix("exec \"$SHELL\" -l -c "))
+    #expect(wrapped.contains("git"))
+    #expect(wrapped.contains("worktree"))
+    #expect(wrapped.contains("add"))
+    #expect(wrapped.contains("-b"))
+    #expect(wrapped.contains("swift-otter"))
+    #expect(wrapped.contains("/swift-otter"))
+    #expect(wrapped.contains("HEAD"))
+  }
+
   @Test func parseWorktreePorcelainParsesBranchDetachedAndSkipsBare() {
     let output = """
       bare
