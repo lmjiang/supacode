@@ -124,3 +124,70 @@ file sync — just terminal + git. The single chokepoint is the transport: make
   (and the `wt` shim) are available on the remote `$PATH`.
 - File watching: the local kqueue HEAD watcher can't cross SSH; replace with a
   debounced `git rev-parse HEAD` poll for remote worktrees.
+
+## 3. Remote SSH host — sidebar UI (Phase B, first slice)
+
+Phase B makes remote worktrees usable from the GUI: you can add an SSH host
+through the sidebar, and remote repos are visually separated from local ones.
+
+### Pieces
+
+1. **`RemoteRepositoryConfig`** (`SupacodeSettingsShared/Models`) — a persisted
+   `(host, remotePath, displayName)`. Stored in
+   **`GlobalSettings.remoteRepositories`** (mirrors `globalScripts`), so it
+   survives relaunch and never touches the local `repositoryRoots` list.
+
+2. **`Repository.host`** — non-nil marks a remote repository. Each remote config
+   is materialized at load (`RepositoriesFeature.synthesizeRemoteRepositories`)
+   into a **folder-kind** `Repository` whose single synthetic worktree carries
+   the host. Folder-kind = no git shell-outs against the (locally unreachable)
+   remote path; selection + terminal reuse the folder machinery, and the
+   terminal goes SSH because `Worktree.host != nil` (Phase A). Remote repo /
+   worktree ids are **host-keyed** (`remote:<dest>:<path>`) so they never
+   collide with a local path, and the local-only `buildRepositorySections` loop
+   (keyed off `rootURL.path`) never accidentally renders them.
+
+3. **Load merge** — `loadRepositoriesData` appends the synthesized remote repos
+   on *every* load path (initial, reload, open, removal), reading the configs
+   through `@Shared(.settingsFile)`. `state.repositoryRoots` stays local-only, so
+   reload never tries to stat a remote path; `reconcileSidebarItems` /
+   `reconcileSidebarState` iterate `state.repositories` (which includes remote),
+   so remote rows + seeded sidebar sections come for free.
+
+4. **Sidebar partition** — `SidebarStructure` gains `RepositoryLocality` and a
+   `.partitionHeader(kind:)` section. `buildRepositorySections` emits local repo
+   sections, then (only when remote repos exist) a `Local` header, the locals,
+   a `Remote` header, and the remote folder sections. A purely-local sidebar is
+   visually unchanged.
+
+5. **Add entry** — the sidebar's `Add…` toolbar button is now a menu:
+   *Repository or Folder…* (the existing local `NSOpenPanel`) and
+   *Remote Repository…* → `AddRemoteRepositorySheet` (ssh host / user / port /
+   remote path / name). Submit dispatches `.addRemoteRepository(config)`, which
+   appends to `GlobalSettings.remoteRepositories` and reloads.
+
+6. **Remote terminal cwd** — for a remote worktree, the surface command defaults
+   to `cd <remotePath> 2>/dev/null; exec "$SHELL" -l` so a freshly created zmx
+   session lands in the project directory.
+
+### How to verify in the GUI
+
+1. Make sure the remote host has `zmx` on its `$PATH` (see §2 layer 2).
+2. In Supacode: sidebar toolbar **Add… → Remote Repository…**, enter an ssh
+   host (e.g. `mbp`) and an absolute remote path, Add.
+3. The repo appears under a **Remote** section header. Select it → a terminal
+   opens over `ssh -tt <host> zmx attach …`, lands in the remote dir, and
+   renders locally. (First connection may require a FIDO touch.)
+
+### Phase B known limitations / follow-ups
+
+- Remote repo/worktree ids embed `host:path` but the path is not otherwise
+  host-namespaced in `folderWorktreeID`; two hosts at the same path, or a remote
+  path equal to a local repo path, are not supported (documented edge).
+- A `~`-relative remote path round-trips through `URL(fileURLWithPath:)`, so the
+  `cd` may miss (the `2>/dev/null` fallback keeps the shell usable). Prefer an
+  absolute remote path for now.
+- No remote-repo removal UI yet (the `.removeRemoteRepository` action exists);
+  no per-remote customization, no remote git worktree discovery/creation.
+- `isGitRepository` / `rootDirectoryExists` still probe the local filesystem;
+  remote repos are folder-kind so they don't hit that path.
