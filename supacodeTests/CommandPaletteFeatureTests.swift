@@ -17,6 +17,7 @@ struct CommandPaletteFeatureTests {
       "global.check-for-updates",
       "global.open-settings",
       "global.open-repository",
+      "global.add-remote-repository",
       "global.new-worktree",
       "global.refresh-worktrees",
       "global.view-archived-worktrees",
