@@ -383,3 +383,62 @@ struct RemoteWorktreeBaseRefTests {
     #expect(!ref.isEmpty)
   }
 }
+
+/// Remote worktree creation honors `fetchOriginBeforeWorktreeCreation` the same
+/// way local does: when enabled and the base ref carries a `<remote>/` prefix,
+/// a `git fetch <remote>` is issued over ssh before `git worktree add`. The
+/// recorder stands in for the local `ssh` process; `git remote` returns a single
+/// `origin` so prefix matching resolves.
+@MainActor
+struct RemoteFetchOriginTests {
+  private func recordingRemoteClient(_ recorder: GitShellInvocationRecorder) -> GitClient {
+    let base = ShellClient(
+      run: { exe, args, cwd in
+        recorder.record(executableURL: exe, arguments: args, currentDirectoryURL: cwd)
+        return ShellOutput(stdout: "origin\n", stderr: "", exitCode: 0)
+      },
+      runLoginImpl: { _, _, _, _ in ShellOutput(stdout: "origin\n", stderr: "", exitCode: 0) }
+    )
+    return GitClient(shell: .ssh(host: RemoteHost(alias: "mbp"), base: base))
+  }
+
+  @Test func fetchesMatchingRemoteWhenEnabled() async {
+    let recorder = GitShellInvocationRecorder()
+    await RepositoriesFeature.fetchRemoteForBaseRefIfNeeded(
+      fetchOrigin: true,
+      baseRef: "origin/main",
+      client: recordingRemoteClient(recorder),
+      repoRoot: URL(fileURLWithPath: "/repo")
+    )
+    // Last ssh invocation is the fetch (it follows `git remote`).
+    let wrapped = recorder.snapshot().arguments.last ?? ""
+    #expect(wrapped.contains("fetch"))
+    #expect(wrapped.contains("origin"))
+  }
+
+  @Test func skipsFetchWhenBaseRefHasNoRemotePrefix() async {
+    let recorder = GitShellInvocationRecorder()
+    await RepositoriesFeature.fetchRemoteForBaseRefIfNeeded(
+      fetchOrigin: true,
+      baseRef: "main",
+      client: recordingRemoteClient(recorder),
+      repoRoot: URL(fileURLWithPath: "/repo")
+    )
+    // Only `git remote` ran (to list); no fetch since `main` has no `<remote>/` prefix.
+    let wrapped = recorder.snapshot().arguments.last ?? ""
+    #expect(wrapped.contains("remote"))
+    #expect(!wrapped.contains("fetch"))
+  }
+
+  @Test func skipsEverythingWhenDisabled() async {
+    let recorder = GitShellInvocationRecorder()
+    await RepositoriesFeature.fetchRemoteForBaseRefIfNeeded(
+      fetchOrigin: false,
+      baseRef: "origin/main",
+      client: recordingRemoteClient(recorder),
+      repoRoot: URL(fileURLWithPath: "/repo")
+    )
+    // The guard returns before listing remotes, so no ssh call is made at all.
+    #expect(recorder.snapshot().executableURL == nil)
+  }
+}

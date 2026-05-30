@@ -148,9 +148,11 @@ extension RepositoriesFeature {
     host: RemoteHost,
     nameSource: WorktreeCreationNameSource,
     baseRefSource: WorktreeCreationBaseRefSource,
-    selectedBaseRef: String?
+    fetchOrigin: Bool
   ) -> Effect<Action> {
     let repoRoot = repository.rootURL
+    @Shared(.repositorySettings(repoRoot)) var remoteRepositorySettings
+    let selectedBaseRef = remoteRepositorySettings.worktreeBaseRef
     let existingNames = Set(repository.worktrees.map { $0.name.lowercased() })
     return .run { send in
       let client = GitClient(shell: .ssh(host: host))
@@ -188,6 +190,8 @@ extension RepositoriesFeature {
         .appending(path: name, directoryHint: .isDirectory)
       let baseRef = await Self.resolveRemoteBaseRef(
         baseRefSource: baseRefSource, selectedBaseRef: selectedBaseRef, client: client, repoRoot: repoRoot)
+      await Self.fetchRemoteForBaseRefIfNeeded(
+        fetchOrigin: fetchOrigin, baseRef: baseRef, client: client, repoRoot: repoRoot)
       do {
         try await client.createGitWorktree(in: repoRoot, name: name, baseRef: baseRef, worktreePath: worktreePath)
         await send(.loadPersistedRepositories)
@@ -223,5 +227,34 @@ extension RepositoriesFeature {
       }
     }
     return resolved.isEmpty ? "HEAD" : resolved
+  }
+
+  /// Mirror the local `fetchOriginBeforeWorktreeCreation` behavior over ssh: when
+  /// enabled, list the remote's remotes, match the one the base ref points at
+  /// (`<remote>/…`), and `git fetch` it on the host before `git worktree add` so
+  /// the new worktree branches from up-to-date refs. Best-effort and non-fatal —
+  /// a fetch failure (offline remote, auth) is logged and creation proceeds, same
+  /// as local. A base ref with no remote prefix (e.g. a local branch or `HEAD`)
+  /// matches nothing and skips the fetch.
+  static func fetchRemoteForBaseRefIfNeeded(
+    fetchOrigin: Bool,
+    baseRef: String,
+    client: GitClient,
+    repoRoot: URL
+  ) async {
+    guard fetchOrigin else { return }
+    let remotes = (try? await client.remoteNames(for: repoRoot)) ?? []
+    guard let matchedRemote = GitReferenceQueries.remotePrefixMatch(ref: baseRef, remoteNames: remotes)?.remote
+    else {
+      return
+    }
+    do {
+      try await client.fetchRemote(matchedRemote, for: repoRoot)
+    } catch {
+      repositoriesLogger.warning(
+        "remote git fetch \(matchedRemote) failed for \(repoRoot.path(percentEncoded: false)): "
+          + error.localizedDescription
+      )
+    }
   }
 }

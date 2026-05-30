@@ -1213,13 +1213,12 @@ struct RepositoriesFeature {
         // reload to re-list. This bypasses the local pending/stream flow below,
         // but honors the same name + base-ref choices from the prompt.
         if let host = repository.host {
-          @Shared(.repositorySettings(repository.rootURL)) var remoteRepositorySettings
           return remoteCreateWorktree(
             repository: repository,
             host: host,
             nameSource: nameSource,
             baseRefSource: baseRefSource,
-            selectedBaseRef: remoteRepositorySettings.worktreeBaseRef
+            fetchOrigin: fetchOrigin
           )
         }
         if state.removingRepositoryIDs[repository.id] != nil {
