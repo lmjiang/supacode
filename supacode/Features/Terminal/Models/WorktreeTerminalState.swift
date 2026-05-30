@@ -904,7 +904,6 @@ final class WorktreeTerminalState {
   }
 
   func dismissNotification(_ notificationID: WorktreeTerminalNotification.ID) {
-    let previousHasUnseen = hasUnseenNotification
     let affectedSurface = notifications.first(where: { $0.id == notificationID })?.surfaceID
     notifications.removeAll { $0.id == notificationID }
     if let affectedSurface {
@@ -913,15 +912,22 @@ final class WorktreeTerminalState {
         emitTabProjection(for: tabId)
       }
     }
-    emitNotificationIndicatorIfNeeded(previousHasUnseen: previousHasUnseen)
+    // Removing a notification changes the row's notification LIST even when no
+    // unseen flag flips (it was already read), so refresh the row projection
+    // unconditionally. The gated `emitNotificationIndicatorIfNeeded` would skip
+    // it for an already-read notification and leave the toolbar bell stuck
+    // showing the dismissed entry. `emitProjection` is equality-gated downstream.
+    onNotificationIndicatorChanged?()
   }
 
   func dismissAllNotifications() {
-    let previousHasUnseen = hasUnseenNotification
     notifications.removeAll()
     clearAllSurfaceUnseenFlags()
     emitAllTabProjections()
-    emitNotificationIndicatorIfNeeded(previousHasUnseen: previousHasUnseen)
+    // See `dismissNotification`: always refresh the row projection so the
+    // toolbar bell clears even when every dismissed notification was already
+    // read (no unseen-flag flip to trigger the gated indicator emit).
+    onNotificationIndicatorChanged?()
   }
 
   /// Recomputes the surface's unseen flag through the canonical predicate so a
