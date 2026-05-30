@@ -145,6 +145,11 @@ final class WorktreeTerminalState {
   /// active surface (selected tab) or worst-of-all (unselected tabs) so the
   /// stripe stays in lock-step with focus and OSC-9 progress mutations.
   var onTabProgressDisplayChanged: ((TerminalTabID, TerminalTabProgressDisplay?) -> Void)?
+  /// Forwards an in-band agent presence signal (parsed off the terminal OSC
+  /// stream) to the manager, which routes it through the same hook-event path
+  /// as the local Unix socket. Carries the agent identity from the OSC; the
+  /// surface id is supplied here from the receiving surface.
+  var onAgentHookEvent: ((AgentHookEvent) -> Void)?
 
   init(
     runtime: GhosttyRuntime,
@@ -1416,6 +1421,10 @@ final class WorktreeTerminalState {
       guard let self, let view else { return }
       self.appendNotification(title: title, body: body, surfaceID: view.id)
     }
+    view.bridge.onPresenceSignal = { [weak self, weak view] agent, event in
+      guard let self, let view else { return }
+      self.dispatchPresenceSignal(agent: agent, event: event, surfaceID: view.id)
+    }
     view.bridge.onCloseRequest = { [weak self, weak view] processAlive in
       guard let self, let view else { return }
       self.handleCloseRequest(for: view, processAlive: processAlive)
@@ -1459,8 +1468,7 @@ final class WorktreeTerminalState {
           host: host,
           sessionID: sessionID,
           userCommand: userCommand,
-          surfaceID: surfaceID,
-          localSocketPath: socketPath
+          surfaceID: surfaceID
         ),
         initialInput
       )
@@ -1578,6 +1586,20 @@ final class WorktreeTerminalState {
       recentHookBySurfaceID[surfaceID] = (text: normalized, recordedAt: now)
     }
     appendNotification(title: title, body: body, surfaceID: surfaceID, fromHook: true)
+  }
+
+  /// Synthesize a hook event from an in-band presence OSC and forward it to the
+  /// manager's hook-event path (`pid: nil` — there's no local pid for a remote
+  /// agent; the presence reducer creates a pid-less record). The surface id is
+  /// the receiving surface, mirroring how the socket envelope is attributed.
+  private func dispatchPresenceSignal(
+    agent: SkillAgent,
+    event: AgentHookEvent.EventName,
+    surfaceID: UUID
+  ) {
+    onAgentHookEvent?(
+      AgentHookEvent(agent: agent.rawValue, event: event.rawValue, surfaceID: surfaceID)
+    )
   }
 
   private func appendNotification(

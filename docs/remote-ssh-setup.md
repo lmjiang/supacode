@@ -212,40 +212,50 @@ points, all routed through reducer state so they can be presented from anywhere:
 - **Sidebar toolbar** — the existing `Add… → Remote Repository…` button now
   dispatches the action instead of toggling a local `@State`.
 
-### Remote agent-hook channel (awaiting-input badge over SSH)
+### Remote agent presence via in-band OSC (awaiting-input badge over SSH)
 
-The orange "awaiting input" badge is driven by a coding agent's hook writing a
-JSON envelope to the **local** Unix socket at `$SUPACODE_SOCKET_PATH`
-(`AgentHookSocketServer`), keyed by `$SUPACODE_SURFACE_ID`. For a local surface
-both vars are in the spawned shell's environment, so it just works. For a remote
-surface the shell runs on the host — neither var is forwarded, and a local Unix
-socket isn't reachable across SSH — so the badge never lit.
+The orange "awaiting input" badge is driven by a coding agent's hook. Locally it
+writes a JSON envelope to the **local** Unix socket `$SUPACODE_SOCKET_PATH`
+(`AgentHookSocketServer`), keyed by `$SUPACODE_SURFACE_ID`. A Unix socket isn't
+reachable across SSH, so for a remote surface the badge never lit.
 
-The remote attach command now sets up the channel
-(`ZmxAttach.buildRemoteCommand` → `SSHCommand.commandLine(reverseSocketForward:)`):
+Rather than tunnel the socket (the earlier, ControlMaster-fragile `ssh -R`
+attempt), presence now also rides the terminal data stream as an **OSC 9**
+sequence — the same channel that already carries everything else over
+`zmx → ssh -tt → libghostty`. zmx forwards OSC verbatim (it only rewrites OSC
+133;A), and an OSC arrives on a specific surface's stream, so it needs no
+out-of-band socket and no `surface_id` plumbing. Flow:
 
-1. The remote command exports `SUPACODE_SURFACE_ID` (always) and
-   `SUPACODE_SOCKET_PATH` (a per-surface remote path,
-   `ZmxAttach.remoteAgentHookSocketPath`) before `zmx attach`.
-2. `ssh -R <remoteSocket>:<localSocket> -o StreamLocalBindUnlink=yes` reverse-
-   forwards that remote socket to the local `AgentHookSocketServer` socket, so a
-   remote `nc -U "$SUPACODE_SOCKET_PATH"` reaches the local server and lights the
-   badge for the right surface.
+1. The hook command (`AgentHookSettingsCommand.compositeCommand`) emits, per
+   event, `printf '\033]9;supacode-presence;v1;<agent>;<event>\a' >/dev/tty`
+   in addition to the local socket envelope. It's guarded by
+   `SUPACODE_SURFACE_ID` alone (independent of the socket guard, so it fires on a
+   remote host with no `SUPACODE_SOCKET_PATH`), and writes to `/dev/tty` — the
+   zmx PTY slave (zmx uses `forkpty`), bypassing the hook's `>/dev/null` stdout
+   (which Codex parses as JSON). The shared definition lives in
+   `AgentPresenceOSC` (sentinel + parser).
+2. libghostty surfaces the OSC as a desktop notification;
+   `GhosttySurfaceBridge` intercepts the sentinel (`parsePresenceSignal`), routes
+   it to `onPresenceSignal` (suppressing the user-facing notification), and
+   `WorktreeTerminalState` synthesizes an `AgentHookEvent` (`pid: nil`, surface
+   from the receiving `view.id`) through the same debounced
+   `WorktreeTerminalManager.dispatchHookEvent` path as the socket.
+3. `AgentPresenceFeature` lazily creates a pid-less record for OSC-origin events
+   (the liveness sweep skips empty-pid records; they clear on pid-less
+   `session_end` or surface close), so local pid-bearing behavior is unchanged.
 
-**Prerequisites / known limitations (verify on a real host):**
+The remote attach command (`ZmxAttach.buildRemoteCommand`) only needs to export
+`SUPACODE_SURFACE_ID` so the OSC fires; no reverse socket, no remote
+`SUPACODE_SOCKET_PATH`.
 
-- **The remote agent must have Supacode's hook installed.** `ClaudeSettingsInstaller`
-  writes the hook into the *local* `~/.claude/settings.json`; the remote host's
-  `~/.claude/settings.json` is untouched. Until the same hook is installed on the
-  remote (writing remote config is a deliberate, not-yet-automated side effect),
-  remote Claude won't emit the `awaiting_input` envelope and the badge stays dark
-  even with the channel wired. This is the remaining end-to-end gap.
-- **SSH ControlMaster interaction.** Reverse forwards bind to the connection that
-  opens the shared master (`ControlPath=~/.ssh/supacode-%C`). If a `-R`-less git
-  call opened the master first, the terminal's `-R` is dropped until the master
-  is re-established. A dedicated control path for the terminal connection (at the
-  cost of a second auth/FIDO touch) is the clean fix if this proves flaky.
-- Requires **OpenSSH ≥ 6.7** on both ends for Unix-domain socket forwarding.
-- Real-host SSH + libghostty rendering remain verified manually (FIDO touch),
-  not in CI/tests; the command construction is unit-tested in
-  `RemoteSSHCommandTests`.
+**Prerequisites / notes (verify on a real host):**
+
+- **Both machines run Supacode**, so the agent hook (now OSC-emitting) is
+  installed on the remote via its own `ClaudeSettingsInstaller`/Codex config.
+  Updating Supacode on the remote rewrites its hook (`.outdated` → reinstall).
+- Real-host SSH + libghostty OSC rendering are verified manually (FIDO touch),
+  not in CI. Unit tests cover the command construction (`AgentHookCommandTests`),
+  OSC parse/routing (`GhosttySurfaceBridgeTests`), and the pid-less presence path
+  (`AgentPresenceFeatureTests`).
+- If a hook ever runs without a controlling tty, the `/dev/tty` write fails
+  harmlessly (`|| true`); locally the socket still delivers presence.

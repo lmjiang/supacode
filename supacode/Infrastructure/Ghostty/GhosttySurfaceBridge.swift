@@ -63,6 +63,11 @@ final class GhosttySurfaceBridge {
   var onCommandFinished: ((Int?) -> Void)?
   var onChildExited: ((UInt32) -> Void)?
   var onDesktopNotification: ((String, String) -> Void)?
+  /// Fired instead of `onDesktopNotification` when a notification carries the
+  /// Supacode presence sentinel (an in-band OSC from an agent hook, see
+  /// `AgentPresenceOSC`). Lets a remote agent's awaiting-input/busy/idle signal
+  /// ride the terminal stream over zmx+ssh, where the Unix socket can't reach.
+  var onPresenceSignal: ((SkillAgent, AgentHookEvent.EventName) -> Void)?
 
   // Coalesce OSC-9 progress: a flush task applies the latest value at the
   // throttle cadence while it moves, and a slow stale-watch clears a bar whose
@@ -278,12 +283,33 @@ final class GhosttySurfaceBridge {
       let title = string(from: note.title) ?? ""
       let body = string(from: note.body) ?? ""
       guard !(title.isEmpty && body.isEmpty) else { return true }
+      // A Supacode presence OSC arrives here as a desktop notification; route it
+      // to presence and suppress the user-facing notification.
+      if let signal = Self.parsePresenceSignal(title: title, body: body) {
+        onPresenceSignal?(signal.agent, signal.event)
+        return true
+      }
       onDesktopNotification?(title, body)
       return true
 
     default:
       return false
     }
+  }
+
+  /// Decode a Supacode presence OSC from a desktop-notification payload. OSC 9
+  /// carries the whole payload in `body` (empty title); prefer `body` but fall
+  /// back to `title` defensively. Returns nil for a genuine notification so the
+  /// caller falls through to `onDesktopNotification`.
+  static func parsePresenceSignal(
+    title: String,
+    body: String
+  ) -> (agent: SkillAgent, event: AgentHookEvent.EventName)? {
+    let payload = body.isEmpty ? title : body
+    guard let parsed = AgentPresenceOSC.parse(payload: payload),
+      let event = AgentHookEvent.EventName(rawValue: parsed.event)
+    else { return nil }
+    return (parsed.agent, event)
   }
 
   private func handleCommandStatus(_ action: ghostty_action_s) -> Bool {

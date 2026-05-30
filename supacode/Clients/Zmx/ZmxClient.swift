@@ -326,50 +326,35 @@ nonisolated enum ZmxAttach {
     host: RemoteHost,
     sessionID: String,
     userCommand: String?,
-    surfaceID: UUID,
-    localSocketPath: String?
+    surfaceID: UUID
   ) -> String {
-    // Only set up the reverse hook channel when there's a local socket to reach.
-    let remoteSocketPath = localSocketPath.map { _ in remoteAgentHookSocketPath(surfaceID: surfaceID) }
-    let forward: (remote: String, local: String)? =
-      remoteSocketPath.flatMap { remote in localSocketPath.map { (remote: remote, local: $0) } }
-    return SSHCommand.commandLine(
+    SSHCommand.commandLine(
       host: host,
       remoteCommand: remoteAttachCommand(
         sessionID: sessionID,
         userCommand: userCommand,
-        surfaceID: surfaceID,
-        remoteSocketPath: remoteSocketPath
-      ),
-      reverseSocketForward: forward
+        surfaceID: surfaceID
+      )
     )
   }
 
-  /// The command the *remote* shell runs: exports the surface id (and, when a
-  /// reverse hook channel is set up, the remote socket path) so a coding agent's
-  /// hook on the host can identify the surface and reach the local hook socket,
-  /// then `zmx attach <id> [/bin/sh -c '<cmd>']`. Mirrors `buildCommand` but
-  /// resolves `zmx` on the remote PATH rather than an absolute local bundle path.
+  /// The command the *remote* shell runs: exports the surface id (so the agent
+  /// hook's in-band presence OSC is gated to a Supacode surface — see
+  /// `AgentHookSettingsCommand.presenceOSC`), then
+  /// `zmx attach <id> [/bin/sh -c '<cmd>']`. Mirrors `buildCommand` but resolves
+  /// `zmx` on the remote PATH rather than an absolute local bundle path. The
+  /// awaiting-input signal rides the terminal stream (OSC), not a socket, so no
+  /// reverse forward / remote `SUPACODE_SOCKET_PATH` is needed.
   static func remoteAttachCommand(
     sessionID: String,
     userCommand: String?,
-    surfaceID: UUID,
-    remoteSocketPath: String?
+    surfaceID: UUID
   ) -> String {
-    var prelude = "export SUPACODE_SURFACE_ID=\(shellQuote(surfaceID.uuidString)); "
-    if let remoteSocketPath {
-      prelude += "export SUPACODE_SOCKET_PATH=\(shellQuote(remoteSocketPath)); "
-    }
+    let prelude = "export SUPACODE_SURFACE_ID=\(shellQuote(surfaceID.uuidString)); "
     let attach = "zmx attach \(sessionID)"
     guard let command = userCommand?.trimmingCharacters(in: .whitespacesAndNewlines), !command.isEmpty else {
       return prelude + attach
     }
     return prelude + "\(attach) /bin/sh -c \(shellQuote(command))"
-  }
-
-  /// Stable per-surface socket path on the remote host that ssh reverse-forwards
-  /// to the local agent-hook socket. Length stays well under `sun_path` (104).
-  static func remoteAgentHookSocketPath(surfaceID: UUID) -> String {
-    "/tmp/supacode-hook-\(surfaceID.uuidString).sock"
   }
 }

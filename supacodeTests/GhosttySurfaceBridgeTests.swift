@@ -3,6 +3,7 @@ import Foundation
 import GhosttyKit
 import Testing
 
+@testable import SupacodeSettingsShared
 @testable import supacode
 
 // Serialized: the coalescing tests drive a TestClock with two concurrent
@@ -108,6 +109,39 @@ struct GhosttySurfaceBridgeTests {
 
     #expect(received?.0 == "Title")
     #expect(received?.1 == "Body")
+  }
+
+  @Test func parsePresenceSignalDecodesSentinelAndRejectsNotifications() {
+    let signal = GhosttySurfaceBridge.parsePresenceSignal(
+      title: "", body: "supacode-presence;v1;claude;awaiting_input")
+    #expect(signal?.agent == .claude)
+    #expect(signal?.event == .awaitingInput)
+    // A genuine desktop notification is not a presence signal.
+    #expect(GhosttySurfaceBridge.parsePresenceSignal(title: "Claude", body: "Task finished") == nil)
+  }
+
+  @Test func presenceOSCRoutesToPresenceAndSuppressesNotification() {
+    let bridge = GhosttySurfaceBridge()
+    var presence: (SkillAgent, AgentHookEvent.EventName)?
+    var notification: (String, String)?
+    bridge.onPresenceSignal = { agent, event in presence = (agent, event) }
+    bridge.onDesktopNotification = { title, body in notification = (title, body) }
+
+    var action = ghostty_action_s()
+    action.tag = GHOSTTY_ACTION_DESKTOP_NOTIFICATION
+    let target = ghostty_target_s()
+    "".withCString { titlePtr in
+      "supacode-presence;v1;claude;awaiting_input".withCString { bodyPtr in
+        action.action.desktop_notification = ghostty_action_desktop_notification_s(
+          title: titlePtr, body: bodyPtr)
+        _ = bridge.handleAction(target: target, action: action)
+      }
+    }
+
+    #expect(presence?.0 == .claude)
+    #expect(presence?.1 == .awaitingInput)
+    // The sentinel notification must NOT surface as a user-facing notification.
+    #expect(notification == nil)
   }
 
   @Test func coalescesBurstOfProgressReports() async {

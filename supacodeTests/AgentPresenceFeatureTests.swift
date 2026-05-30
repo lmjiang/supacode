@@ -21,16 +21,58 @@ struct AgentPresenceFeatureTests {
     #expect(harness.state.agents(forSurface: surfaceID, badgesEnabled: true) == Set([.claude]))
   }
 
-  @Test func sessionStartWithoutPidIsIgnored() {
-    // Every bridge today (Claude/Codex/Kiro hooks, Pi extension) sends a
-    // pid in the envelope. A pid-less event is treated as malformed:
-    // accepting it would create a record the liveness sweep can't reap.
+  @Test func sessionStartWithoutPidSeedsPidlessRecord() {
+    // The local Unix-socket bridges send a pid. An in-band presence OSC (remote
+    // agent over zmx+ssh) has no local pid, so a pid-less session_start seeds a
+    // pid-less record — the liveness sweep skips empty-pid records, and the
+    // record is cleared on pid-less session_end / surface close.
     var harness = Harness()
     let surfaceID = UUID()
 
     harness.send(.hookEventReceived(makeEvent(.sessionStart, agent: .claude, surfaceID: surfaceID)))
 
-    #expect(harness.state.agents(forSurface: surfaceID, badgesEnabled: true).isEmpty)
+    #expect(harness.state.agents(forSurface: surfaceID, badgesEnabled: true) == Set([.claude]))
+  }
+
+  @Test func awaitingInputWithoutPidLazilyCreatesAwaitingRecord() {
+    // A remote agent's awaiting-input OSC arrives with no pid and possibly no
+    // prior session_start; it must still light the badge.
+    var harness = Harness()
+    let surfaceID = UUID()
+
+    harness.send(.hookEventReceived(makeEvent(.awaitingInput, agent: .claude, surfaceID: surfaceID)))
+
+    let instances = harness.state.agents(across: [surfaceID], badgesEnabled: true)
+    #expect(instances.count == 1)
+    #expect(instances.first?.awaitingInput == true)
+  }
+
+  @Test func pidlessActivityIsIdempotent() {
+    var harness = Harness()
+    let surfaceID = UUID()
+
+    harness.send(.hookEventReceived(makeEvent(.awaitingInput, agent: .claude, surfaceID: surfaceID)))
+    harness.send(.hookEventReceived(makeEvent(.awaitingInput, agent: .claude, surfaceID: surfaceID)))
+
+    #expect(harness.state.records.count == 1)
+    #expect(harness.state.agents(across: [surfaceID], badgesEnabled: true).first?.awaitingInput == true)
+  }
+
+  @Test func pidlessSessionEndClearsOnlyPidlessRecord() {
+    var harness = Harness()
+    let pidlessSurface = UUID()
+    let pidSurface = UUID()
+    let pid = getpid()
+
+    harness.send(.hookEventReceived(makeEvent(.awaitingInput, agent: .claude, surfaceID: pidlessSurface)))
+    harness.send(.hookEventReceived(makeEvent(.sessionStart, agent: .claude, surfaceID: pidSurface, pid: pid)))
+
+    // Pid-less session_end clears the pid-less (OSC-origin) record...
+    harness.send(.hookEventReceived(makeEvent(.sessionEnd, agent: .claude, surfaceID: pidlessSurface)))
+    #expect(harness.state.agents(forSurface: pidlessSurface, badgesEnabled: true).isEmpty)
+    // ...but never a local pid-bearing record.
+    harness.send(.hookEventReceived(makeEvent(.sessionEnd, agent: .claude, surfaceID: pidSurface)))
+    #expect(harness.state.agents(forSurface: pidSurface, badgesEnabled: true) == Set([.claude]))
   }
 
   @Test func sessionEndRemovesAgentForSurface() {
