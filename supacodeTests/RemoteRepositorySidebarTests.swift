@@ -336,3 +336,50 @@ struct RemoteOpenedReposTests {
     await store.send(.remoteOpenedRepositoriesLoaded(hostDestination: "mbp", paths: ["/a"]))
   }
 }
+
+@MainActor
+struct RemoteWorktreeBaseRefTests {
+  private func emptyRemoteClient() -> GitClient {
+    let base = ShellClient(
+      run: { _, _, _ in ShellOutput(stdout: "", stderr: "", exitCode: 0) },
+      runLoginImpl: { _, _, _, _ in ShellOutput(stdout: "", stderr: "", exitCode: 0) }
+    )
+    return GitClient(shell: .ssh(host: RemoteHost(alias: "mbp"), base: base))
+  }
+
+  @Test func explicitBaseRefIsUsedVerbatim() async {
+    let ref = await RepositoriesFeature.resolveRemoteBaseRef(
+      baseRefSource: .explicit("origin/dev"),
+      selectedBaseRef: nil,
+      client: emptyRemoteClient(),
+      repoRoot: URL(fileURLWithPath: "/repo")
+    )
+    #expect(ref == "origin/dev")
+  }
+
+  @Test func repositorySettingBaseRefIsUsed() async {
+    let ref = await RepositoriesFeature.resolveRemoteBaseRef(
+      baseRefSource: .repositorySetting,
+      selectedBaseRef: "main",
+      client: emptyRemoteClient(),
+      repoRoot: URL(fileURLWithPath: "/repo")
+    )
+    #expect(ref == "main")
+  }
+
+  @Test func delegatesToRemoteAutomaticBaseRefWhenNoExplicitSelection() async {
+    // No explicit ref / repo setting → delegate to the remote's automatic base
+    // ref (mirrors local), not a hardcoded HEAD.
+    let repoRoot = URL(fileURLWithPath: "/repo")
+    let client = emptyRemoteClient()
+    let expected = await client.automaticWorktreeBaseRef(for: repoRoot) ?? "HEAD"
+    let ref = await RepositoriesFeature.resolveRemoteBaseRef(
+      baseRefSource: .repositorySetting,
+      selectedBaseRef: "",
+      client: client,
+      repoRoot: repoRoot
+    )
+    #expect(ref == expected)
+    #expect(!ref.isEmpty)
+  }
+}

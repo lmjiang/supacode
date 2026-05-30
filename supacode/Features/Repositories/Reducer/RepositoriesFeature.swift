@@ -922,19 +922,6 @@ struct RepositoriesFeature {
           )
           return .none
         }
-        // Remote repos create worktrees over ssh (`git worktree add`). Skip the
-        // local branch-loading prompt and go straight to random-name creation;
-        // `createWorktreeInRepository` runs the remote path.
-        if repository.host != nil {
-          return .send(
-            .createWorktreeInRepository(
-              repositoryID: repository.id,
-              nameSource: .random,
-              baseRefSource: .repositorySetting,
-              fetchOrigin: false
-            )
-          )
-        }
         if state.removingRepositoryIDs[repository.id] != nil {
           state.alert = messageAlert(
             title: "Unable to create worktree",
@@ -958,7 +945,11 @@ struct RepositoriesFeature {
         }
         @Shared(.repositorySettings(repository.rootURL)) var repositorySettings
         let selectedBaseRef = repositorySettings.worktreeBaseRef
-        let gitClient = gitClient
+        // Remote repos load the prompt's branch lists over ssh (host-aware
+        // client); local uses the injected client. The dialog loads these in
+        // the background, so the ssh round-trips (multiplexed over the warm
+        // ControlMaster) don't block presentation.
+        let gitClient = repository.host.map { GitClientDependency.ssh(host: $0) } ?? gitClient
         let rootURL = repository.rootURL
         // Resolve the cheap quick-picks (auto ref + matching local
         // branch) and present the prompt right away, then load the
@@ -1219,9 +1210,17 @@ struct RepositoriesFeature {
           return .none
         }
         // Remote repos create worktrees over ssh via `git worktree add`, then
-        // reload to re-list. This bypasses the local pending/stream flow below.
+        // reload to re-list. This bypasses the local pending/stream flow below,
+        // but honors the same name + base-ref choices from the prompt.
         if let host = repository.host {
-          return remoteCreateWorktree(repository: repository, host: host, nameSource: nameSource)
+          @Shared(.repositorySettings(repository.rootURL)) var remoteRepositorySettings
+          return remoteCreateWorktree(
+            repository: repository,
+            host: host,
+            nameSource: nameSource,
+            baseRefSource: baseRefSource,
+            selectedBaseRef: remoteRepositorySettings.worktreeBaseRef
+          )
         }
         if state.removingRepositoryIDs[repository.id] != nil {
           state.alert = messageAlert(

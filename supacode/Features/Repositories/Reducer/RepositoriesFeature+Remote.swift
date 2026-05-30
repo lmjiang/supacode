@@ -138,13 +138,17 @@ extension RepositoriesFeature {
 
   /// Remote worktree creation: pick a name (excluding remote branches), run
   /// `git worktree add` over ssh, then reload to re-list. Bypasses the local
-  /// pending/stream flow. `baseRef` is the remote HEAD and the new worktree
-  /// lands beside the repo root (`<parent>/<name>`), so no parent dir needs to
-  /// be created first.
+  /// pending/stream flow but honors the prompt's name + base-ref choices. The
+  /// base ref is resolved the same way as local (`baseRefSource` → explicit /
+  /// repo setting, falling back to the remote's automatic base ref), and the
+  /// new worktree lands beside the repo root (`<parent>/<name>`), so no parent
+  /// dir needs to be created first.
   func remoteCreateWorktree(
     repository: Repository,
     host: RemoteHost,
-    nameSource: WorktreeCreationNameSource
+    nameSource: WorktreeCreationNameSource,
+    baseRefSource: WorktreeCreationBaseRefSource,
+    selectedBaseRef: String?
   ) -> Effect<Action> {
     let repoRoot = repository.rootURL
     let existingNames = Set(repository.worktrees.map { $0.name.lowercased() })
@@ -182,12 +186,42 @@ extension RepositoriesFeature {
       }
       let worktreePath = repoRoot.deletingLastPathComponent()
         .appending(path: name, directoryHint: .isDirectory)
+      let baseRef = await Self.resolveRemoteBaseRef(
+        baseRefSource: baseRefSource, selectedBaseRef: selectedBaseRef, client: client, repoRoot: repoRoot)
       do {
-        try await client.createGitWorktree(in: repoRoot, name: name, baseRef: "HEAD", worktreePath: worktreePath)
+        try await client.createGitWorktree(in: repoRoot, name: name, baseRef: baseRef, worktreePath: worktreePath)
         await send(.loadPersistedRepositories)
       } catch {
         await send(.presentAlert(title: "Unable to create worktree", message: error.localizedDescription))
       }
     }
+  }
+
+  /// Resolve the base ref for a remote worktree the same way the local path does
+  /// (`baseRefSource` → explicit / repo setting, falling back to the remote's
+  /// automatic base ref), defaulting to `HEAD` when nothing resolves so
+  /// `git worktree add` always has a concrete committish.
+  static func resolveRemoteBaseRef(
+    baseRefSource: WorktreeCreationBaseRefSource,
+    selectedBaseRef: String?,
+    client: GitClient,
+    repoRoot: URL
+  ) async -> String {
+    let resolved: String
+    switch baseRefSource {
+    case .repositorySetting:
+      if let selectedBaseRef, !selectedBaseRef.isEmpty {
+        resolved = selectedBaseRef
+      } else {
+        resolved = await client.automaticWorktreeBaseRef(for: repoRoot) ?? ""
+      }
+    case .explicit(let explicit):
+      if let explicit, !explicit.isEmpty {
+        resolved = explicit
+      } else {
+        resolved = await client.automaticWorktreeBaseRef(for: repoRoot) ?? ""
+      }
+    }
+    return resolved.isEmpty ? "HEAD" : resolved
   }
 }
