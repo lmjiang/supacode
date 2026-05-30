@@ -239,3 +239,100 @@ struct RemoteWorktreeInfoTests {
     }
   }
 }
+
+struct SSHConfigHostsTests {
+  @Test func parsesAliasWithHostNameUserPort() {
+    let config = """
+      Host mbp
+        HostName 192.168.1.10
+        User lmjiang
+        Port 2222
+
+      Host box
+        User dev
+      """
+    let hosts = SSHConfigHosts.parse(config)
+    #expect(hosts == [
+      SSHConfigHost(alias: "mbp", hostName: "192.168.1.10", user: "lmjiang", port: 2222),
+      SSHConfigHost(alias: "box", hostName: nil, user: "dev", port: nil),
+    ])
+  }
+
+  @Test func skipsWildcardHosts() {
+    #expect(SSHConfigHosts.parse("Host *\n  User x\nHost prod\n  HostName p").map(\.alias) == ["prod"])
+  }
+
+  @Test func handlesMultipleAliasesAndEqualsForm() {
+    let hosts = SSHConfigHosts.parse("Host a b\n  HostName=h\n  Port = 22")
+    #expect(hosts.map(\.alias) == ["a", "b"])
+    #expect(hosts[0].hostName == "h")
+    #expect(hosts[0].port == 22)
+  }
+
+  @Test func dedupesAliasesPreservingOrderAndIgnoresComments() {
+    #expect(SSHConfigHosts.parse("# c\n\nHost a\nHost b\nHost a").map(\.alias) == ["a", "b"])
+  }
+}
+
+@MainActor
+struct RemoteOpenedReposTests {
+  @Test func parseOpenedRepoPathsTrimsBlanksAndDedupes() throws {
+    let settings = SettingsFile(repositoryRoots: ["/a", "/b", "  /a  ", ""])
+    let json = try #require(String(data: JSONEncoder().encode(settings), encoding: .utf8))
+    #expect(RepositoriesFeature.parseOpenedRepoPaths(fromSettingsJSON: json) == ["/a", "/b"])
+  }
+
+  @Test func parseOpenedRepoPathsReturnsEmptyForUnusableInput() {
+    #expect(RepositoriesFeature.parseOpenedRepoPaths(fromSettingsJSON: "") == [])
+    #expect(RepositoriesFeature.parseOpenedRepoPaths(fromSettingsJSON: "not json") == [])
+  }
+
+  @Test func loadRemoteOpenedRepoPathsCatsRemoteSettingsAndParses() async throws {
+    let settings = SettingsFile(repositoryRoots: ["/home/me/proj"])
+    let json = try #require(String(data: JSONEncoder().encode(settings), encoding: .utf8))
+    let recorder = GitShellInvocationRecorder()
+    let base = ShellClient(
+      run: { exe, args, cwd in
+        recorder.record(executableURL: exe, arguments: args, currentDirectoryURL: cwd)
+        return ShellOutput(stdout: json, stderr: "", exitCode: 0)
+      },
+      runLoginImpl: { _, _, _, _ in ShellOutput(stdout: "", stderr: "", exitCode: 0) }
+    )
+    let host = RemoteHost(alias: "mbp")
+    let paths = await RepositoriesFeature.loadRemoteOpenedRepoPaths(
+      host: host, shell: .ssh(host: host, base: base))
+
+    #expect(paths == ["/home/me/proj"])
+    let snapshot = recorder.snapshot()
+    #expect(snapshot.executableURL == URL(fileURLWithPath: "/usr/bin/ssh"))
+    let wrapped = snapshot.arguments.last ?? ""
+    #expect(wrapped.contains(".supacode/settings.json"))
+  }
+
+  @Test func remoteOpenedRepositoriesLoadedStoresPathsForMatchingHost() async {
+    var initial = RepositoriesFeature.State()
+    initial.remoteOpenedReposHostDestination = "mbp"
+    initial.isLoadingRemoteOpenedRepos = true
+    let store = TestStore(initialState: initial) {
+      RepositoriesFeature()
+    } withDependencies: {
+      $0.sidebarStructureAutoRecompute = false
+    }
+    await store.send(.remoteOpenedRepositoriesLoaded(hostDestination: "mbp", paths: ["/a", "/b"])) {
+      $0.isLoadingRemoteOpenedRepos = false
+      $0.remoteOpenedRepoPaths = ["/a", "/b"]
+    }
+  }
+
+  @Test func remoteOpenedRepositoriesLoadedIgnoresStaleHost() async {
+    var initial = RepositoriesFeature.State()
+    initial.remoteOpenedReposHostDestination = "box"
+    let store = TestStore(initialState: initial) {
+      RepositoriesFeature()
+    } withDependencies: {
+      $0.sidebarStructureAutoRecompute = false
+    }
+    // No state change: the result is for a host the user already switched away from.
+    await store.send(.remoteOpenedRepositoriesLoaded(hostDestination: "mbp", paths: ["/a"]))
+  }
+}

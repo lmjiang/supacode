@@ -418,7 +418,8 @@ extension RepositoriesFeature.Action {
       return []
 
     // Everything else is UI / effects / transient state, no cache touched.
-    case .task, .setOpenPanelPresented, .setAddRemoteRepositoryPresented, .loadPersistedRepositories,
+    case .task, .setOpenPanelPresented, .setAddRemoteRepositoryPresented,
+      .loadRemoteOpenedRepositories, .remoteOpenedRepositoriesLoaded, .loadPersistedRepositories,
       .addRemoteRepository, .removeRemoteRepository,
       .refreshWorktrees, .reloadRepositories,
       .setSidebarSelectedWorktreeIDs,

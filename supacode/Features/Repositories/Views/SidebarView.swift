@@ -68,7 +68,7 @@ struct SidebarView: View {
     .sheet(
       isPresented: $store.isAddRemoteRepositoryPresented.sending(\.setAddRemoteRepositoryPresented)
     ) {
-      AddRemoteRepositorySheet { config in
+      AddRemoteRepositorySheet(store: store) { config in
         store.send(.addRemoteRepository(config))
       }
     }

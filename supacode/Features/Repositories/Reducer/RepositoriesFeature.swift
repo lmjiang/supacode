@@ -90,6 +90,12 @@ struct RepositoriesFeature {
     var selection: SidebarSelection?
     var isOpenPanelPresented = false
     var isAddRemoteRepositoryPresented = false
+    /// Repo roots the picked host's own Supacode has open, read over ssh for the
+    /// Add-Remote sheet's pick-list. Keyed to `remoteOpenedReposHostDestination`
+    /// so a stale async result for a since-changed host is ignored.
+    var remoteOpenedRepoPaths: [String] = []
+    var isLoadingRemoteOpenedRepos = false
+    var remoteOpenedReposHostDestination: String?
     var isInitialLoadComplete = false
     var pendingWorktrees: [PendingWorktree] = []
     /// In-flight customization payloads, keyed by `(repositoryID, branchName)`
@@ -251,6 +257,8 @@ struct RepositoriesFeature {
     case sidebarNestByBranchChanged
     case setOpenPanelPresented(Bool)
     case setAddRemoteRepositoryPresented(Bool)
+    case loadRemoteOpenedRepositories(RemoteHost)
+    case remoteOpenedRepositoriesLoaded(hostDestination: String, paths: [String])
     case addRemoteRepository(RemoteRepositoryConfig)
     case removeRemoteRepository(Repository.ID)
     case loadPersistedRepositories
@@ -528,6 +536,27 @@ struct RepositoriesFeature {
 
       case .setAddRemoteRepositoryPresented(let isPresented):
         state.isAddRemoteRepositoryPresented = isPresented
+        if !isPresented {
+          state.remoteOpenedRepoPaths = []
+          state.isLoadingRemoteOpenedRepos = false
+          state.remoteOpenedReposHostDestination = nil
+        }
+        return .none
+
+      case .loadRemoteOpenedRepositories(let host):
+        state.isLoadingRemoteOpenedRepos = true
+        state.remoteOpenedReposHostDestination = host.sshDestination
+        state.remoteOpenedRepoPaths = []
+        return .run { send in
+          let paths = await Self.loadRemoteOpenedRepoPaths(host: host)
+          await send(.remoteOpenedRepositoriesLoaded(hostDestination: host.sshDestination, paths: paths))
+        }
+
+      case .remoteOpenedRepositoriesLoaded(let hostDestination, let paths):
+        // Drop a stale result for a host the user already switched away from.
+        guard state.remoteOpenedReposHostDestination == hostDestination else { return .none }
+        state.isLoadingRemoteOpenedRepos = false
+        state.remoteOpenedRepoPaths = paths
         return .none
 
       case .addRemoteRepository(let config):

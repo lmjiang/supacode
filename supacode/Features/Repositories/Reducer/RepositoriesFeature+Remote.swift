@@ -69,6 +69,42 @@ extension RepositoriesFeature {
     )
   }
 
+  /// Read the remote host's own Supacode config (`~/.supacode/settings.json`)
+  /// over ssh and return the repo roots it already has open, so the Add-Remote
+  /// sheet can offer them as a pick-list. Opportunistic and read-only: installs
+  /// nothing on the remote, and returns `[]` when the remote has no Supacode
+  /// config (never run / no repos) so the caller falls back to manual entry.
+  static func loadRemoteOpenedRepoPaths(
+    host: RemoteHost,
+    shell: ShellClient? = nil
+  ) async -> [String] {
+    let shell = shell ?? .ssh(host: host)
+    // `$HOME` is expanded by the remote shell; `|| true` keeps a missing file a
+    // clean empty result instead of a non-zero exit that `run` would throw on.
+    let script = #"cat "$HOME/.supacode/settings.json" 2>/dev/null || true"#
+    guard
+      let output = try? await shell.run(URL(fileURLWithPath: "/bin/sh"), ["-c", script], nil)
+    else {
+      return []
+    }
+    return parseOpenedRepoPaths(fromSettingsJSON: output.stdout)
+  }
+
+  /// Pure decode of a remote `settings.json` into its repo roots: trimmed,
+  /// blanks dropped, de-duplicated preserving order. Returns `[]` for empty or
+  /// undecodable input.
+  static func parseOpenedRepoPaths(fromSettingsJSON json: String) -> [String] {
+    guard let data = json.data(using: .utf8), !data.isEmpty,
+      let settings = try? JSONDecoder().decode(SettingsFile.self, from: data)
+    else {
+      return []
+    }
+    var seen: Set<String> = []
+    return settings.repositoryRoots
+      .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
+      .filter { !$0.isEmpty && seen.insert($0).inserted }
+  }
+
   /// Re-key a worktree parsed from the remote `git worktree list` with the host
   /// and a host-keyed id, preserving everything else.
   static func remoteWorktree(from base: Worktree, host: RemoteHost) -> Worktree {
