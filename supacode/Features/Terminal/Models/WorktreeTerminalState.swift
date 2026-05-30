@@ -1421,10 +1421,7 @@ final class WorktreeTerminalState {
       guard let self, let view else { return }
       self.appendNotification(title: title, body: body, surfaceID: view.id)
     }
-    view.bridge.onPresenceSignal = { [weak self, weak view] agent, event in
-      guard let self, let view else { return }
-      self.dispatchPresenceSignal(agent: agent, event: event, surfaceID: view.id)
-    }
+    wireAgentSignalCallbacks(view: view)
     view.bridge.onCloseRequest = { [weak self, weak view] processAlive in
       guard let self, let view else { return }
       self.handleCloseRequest(for: view, processAlive: processAlive)
@@ -1600,6 +1597,30 @@ final class WorktreeTerminalState {
     onAgentHookEvent?(
       AgentHookEvent(agent: agent.rawValue, event: event.rawValue, surfaceID: surfaceID)
     )
+  }
+
+  /// Wires the in-band agent presence + notification OSC callbacks. Extracted
+  /// from `wireSurfaceCallbacks` so each stays a small, surface-scoped closure.
+  private func wireAgentSignalCallbacks(view: GhosttySurfaceView) {
+    view.bridge.onPresenceSignal = { [weak self, weak view] agent, event in
+      guard let self, let view else { return }
+      self.dispatchPresenceSignal(agent: agent, event: event, surfaceID: view.id)
+    }
+    view.bridge.onAgentNotification = { [weak self, weak view] agent, payload in
+      guard let self, let view else { return }
+      self.handleRemoteAgentNotification(agent: agent, payload: payload, surfaceID: view.id)
+    }
+  }
+
+  /// A remote agent's hook notification, forwarded in-band over OSC (the local
+  /// socket can't cross ssh). Decoded with the same parser as the socket path
+  /// and routed through `appendHookNotification`, so it records the dedup
+  /// watermark and rings exactly like a local hook notification.
+  private func handleRemoteAgentNotification(agent: SkillAgent, payload: Data, surfaceID: UUID) {
+    guard let note = AgentHookSocketServer.parseNotification(agent: agent.rawValue, data: payload) else {
+      return
+    }
+    appendHookNotification(title: note.title ?? "", body: note.body ?? "", surfaceID: surfaceID)
   }
 
   private func appendNotification(

@@ -396,7 +396,10 @@ final class AgentHookSocketServer {
     )
   }
 
-  private nonisolated static func parseNotification(
+  /// Decode an agent's notification payload (the hook JSON) into title/body.
+  /// Shared with the in-band OSC notification path (`GhosttySurfaceBridge` →
+  /// `WorktreeTerminalState`) so socket and OSC delivery parse identically.
+  nonisolated static func parseNotification(
     agent: String,
     data: Data
   ) -> AgentHookNotification? {

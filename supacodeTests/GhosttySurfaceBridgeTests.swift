@@ -144,6 +144,40 @@ struct GhosttySurfaceBridgeTests {
     #expect(notification == nil)
   }
 
+  @Test func notifyOSCRoutesToAgentNotificationAndSuppressesNotification() {
+    let bridge = GhosttySurfaceBridge()
+    var note: (SkillAgent, Data)?
+    var notification: (String, String)?
+    bridge.onAgentNotification = { agent, data in note = (agent, data) }
+    bridge.onDesktopNotification = { title, body in notification = (title, body) }
+
+    let raw = Data(#"{"message":"needs input"}"#.utf8)
+    let body = "supacode-notify;v1;claude;\(raw.base64EncodedString())"
+    var action = ghostty_action_s()
+    action.tag = GHOSTTY_ACTION_DESKTOP_NOTIFICATION
+    let target = ghostty_target_s()
+    "".withCString { titlePtr in
+      body.withCString { bodyPtr in
+        action.action.desktop_notification = ghostty_action_desktop_notification_s(
+          title: titlePtr, body: bodyPtr)
+        _ = bridge.handleAction(target: target, action: action)
+      }
+    }
+
+    #expect(note?.0 == .claude)
+    #expect(note?.1 == raw)
+    #expect(notification == nil)
+  }
+
+  @Test func parseNotifySignalDecodesSentinelAndRejectsNotifications() {
+    let raw = Data("needs input".utf8)
+    let signal = GhosttySurfaceBridge.parseNotifySignal(
+      title: "", body: "supacode-notify;v1;claude;\(raw.base64EncodedString())")
+    #expect(signal?.agent == .claude)
+    #expect(signal?.data == raw)
+    #expect(GhosttySurfaceBridge.parseNotifySignal(title: "Claude", body: "Task finished") == nil)
+  }
+
   @Test func coalescesBurstOfProgressReports() async {
     let clock = TestClock()
     let bridge = GhosttySurfaceBridge(
