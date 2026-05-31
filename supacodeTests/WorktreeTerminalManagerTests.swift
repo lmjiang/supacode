@@ -522,6 +522,38 @@ struct WorktreeTerminalManagerTests {
     #expect(manager.hasUnseenNotifications(for: worktree.id) == false)
   }
 
+  @Test func dismissAllNotificationsRefreshesRowWhenAllAlreadyRead() {
+    // Repro of the stuck-toolbar-bell bug: dismissing already-read notifications
+    // flips no unseen flag, so the gated indicator emit used to skip the row
+    // projection refresh and the bell stayed showing them. Dismiss must signal
+    // unconditionally so the sidebar row's `notifications` array (which the bell
+    // group-existence check reads) clears.
+    let manager = WorktreeTerminalManager(runtime: GhosttyRuntime())
+    let state = manager.state(for: makeWorktree())
+    state.setNotificationsForTesting([makeNotification(isRead: true), makeNotification(isRead: true)])
+    var indicatorEmits = 0
+    state.onNotificationIndicatorChanged = { indicatorEmits += 1 }
+
+    state.dismissAllNotifications()
+
+    #expect(state.notifications.isEmpty)
+    #expect(indicatorEmits == 1)
+  }
+
+  @Test func dismissReadNotificationRefreshesRow() {
+    let manager = WorktreeTerminalManager(runtime: GhosttyRuntime())
+    let state = manager.state(for: makeWorktree())
+    let read = makeNotification(isRead: true)
+    state.setNotificationsForTesting([read])
+    var indicatorEmits = 0
+    state.onNotificationIndicatorChanged = { indicatorEmits += 1 }
+
+    state.dismissNotification(read.id)
+
+    #expect(state.notifications.isEmpty)
+    #expect(indicatorEmits == 1)
+  }
+
   // MARK: - Per-surface unseen flag
 
   @Test func setNotificationsForTestingHydratesPerSurfaceFlag() {

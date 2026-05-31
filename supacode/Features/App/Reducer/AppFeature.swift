@@ -907,6 +907,9 @@ struct AppFeature {
       case .commandPalette(.delegate(.openRepository)):
         return .send(.repositories(.setOpenPanelPresented(true)))
 
+      case .commandPalette(.delegate(.addRemoteRepository)):
+        return .send(.repositories(.setAddRemoteRepositoryPresented(true)))
+
       case .commandPalette(.delegate(.removeWorktree(let worktreeID, let repositoryID))):
         return .send(
           .repositories(

@@ -413,6 +413,11 @@ final class WorktreeTerminalManager {
     state.onSurfacesClosed = { [weak self] ids in
       self?.emit(.surfacesClosed(ids))
     }
+    state.onAgentHookEvent = { [weak self] event in
+      // Route an in-band presence OSC through the same debounced path as the
+      // Unix-socket envelope, so local and remote presence behave identically.
+      self?.dispatchHookEvent(event)
+    }
     state.onNotificationReceived = { [weak self] surfaceID, title, body in
       self?.emit(
         .notificationReceived(

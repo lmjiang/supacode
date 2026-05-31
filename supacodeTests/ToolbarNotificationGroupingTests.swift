@@ -4,6 +4,7 @@ import OrderedCollections
 import Sharing
 import Testing
 
+@testable import SupacodeSettingsShared
 @testable import supacode
 
 @MainActor
@@ -183,6 +184,44 @@ struct ToolbarNotificationGroupingTests {
     let groups = state.computeToolbarNotificationGroups()
 
     #expect(groups.first?.worktrees.first?.name == "Spicy")
+  }
+
+  @Test func includesRemoteRepositoryNotifications() {
+    // Remote repos are host-keyed and absent from `repositoryRoots` (which is
+    // local-only), so `orderedRepositoryIDs()` doesn't list them. The toolbar
+    // bell must still surface their notifications.
+    let host = RemoteHost(alias: "devbox")
+    let repoID = "remote:devbox:/home/me/proj"
+    let feature = Worktree(
+      id: "devbox:/home/me/proj/feature",
+      name: "feature",
+      detail: "",
+      workingDirectory: URL(fileURLWithPath: "/home/me/proj/feature"),
+      repositoryRootURL: URL(fileURLWithPath: "/home/me/proj"),
+      host: host
+    )
+    let repo = Repository(
+      id: repoID,
+      rootURL: URL(fileURLWithPath: "/home/me/proj"),
+      name: "proj",
+      worktrees: IdentifiedArray(uniqueElements: [feature]),
+      isGitRepository: true,
+      host: host
+    )
+    var state = RepositoriesFeature.State(reconciledRepositories: [repo])
+    // repositoryRoots intentionally left empty — the remote repo isn't in it.
+
+    setRowNotifications(
+      &state, id: feature.id,
+      notifications: [
+        WorktreeTerminalNotification(surfaceID: UUID(), title: "Remote", body: "needs input", createdAt: .distantPast)
+      ])
+
+    let groups = state.computeToolbarNotificationGroups()
+
+    #expect(groups.map(\.id) == [repoID])
+    #expect(groups.first?.worktrees.map(\.id) == [feature.id])
+    #expect(groups.first?.unseenWorktreeCount == 1)
   }
 
   private func setRowNotifications(

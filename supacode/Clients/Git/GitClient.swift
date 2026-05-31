@@ -15,6 +15,7 @@ enum GitOperation: String {
   case branchRefs = "branch_refs"
   case defaultRemoteBranchRef = "default_remote_branch_ref"
   case localHeadRef = "local_head_ref"
+  case symbolicHeadRef = "symbolic_head_ref"
   case ignoredFileCount = "ignored_file_count"
   case untrackedFileCount = "untracked_file_count"
   case branchDelete = "branch_delete"
@@ -143,6 +144,89 @@ struct GitClient {
         return lhs.index < rhs.index
       }
       .map(\.worktree)
+  }
+
+  /// Worktrees via standard `git worktree list --porcelain`. Used for remote
+  /// (SSH) repositories where the bundled `wt` shim isn't available — the only
+  /// requirement is `git` on the remote PATH. Returns the same `Worktree`
+  /// shape as `worktrees(for:)`; the caller injects `host` / host-keyed ids.
+  /// Remote paths can't be stat'd locally, so `isMissing` is always false and
+  /// there's no creation-date sort (git's listing order is kept, main first).
+  nonisolated func gitWorktrees(for repoRoot: URL) async throws -> [Worktree] {
+    let repositoryRootURL = repoRoot.standardizedFileURL
+    let output = try await runGit(
+      operation: .worktreeList,
+      arguments: ["-C", repositoryRootURL.path(percentEncoded: false), "worktree", "list", "--porcelain"]
+    )
+    return Self.parseWorktreePorcelain(output, repositoryRootURL: repositoryRootURL)
+  }
+
+  /// Parse `git worktree list --porcelain`: blank-line-separated blocks of
+  /// `worktree <path>` / `HEAD <sha>` / `branch refs/heads/<name>` (or
+  /// `detached`); a `bare` block for the bare root is skipped.
+  nonisolated static func parseWorktreePorcelain(
+    _ output: String,
+    repositoryRootURL: URL
+  ) -> [Worktree] {
+    var worktrees: [Worktree] = []
+    for block in output.components(separatedBy: "\n\n") {
+      var path: String?
+      var branch: String?
+      var isBare = false
+      var isDetached = false
+      for rawLine in block.split(whereSeparator: \.isNewline) {
+        let line = String(rawLine).trimmingCharacters(in: .whitespaces)
+        if line.hasPrefix("worktree ") {
+          path = String(line.dropFirst("worktree ".count))
+        } else if line.hasPrefix("branch ") {
+          let ref = String(line.dropFirst("branch ".count))
+          let headsPrefix = "refs/heads/"
+          branch = ref.hasPrefix(headsPrefix) ? String(ref.dropFirst(headsPrefix.count)) : ref
+        } else if line == "bare" {
+          isBare = true
+        } else if line == "detached" {
+          isDetached = true
+        }
+      }
+      guard let path, !path.isEmpty, !isBare else { continue }
+      let worktreeURL = URL(fileURLWithPath: path).standardizedFileURL
+      let isAttached = (branch != nil) && !isDetached
+      let name = isAttached ? (branch ?? worktreeURL.lastPathComponent) : worktreeURL.lastPathComponent
+      worktrees.append(
+        Worktree(
+          id: worktreeURL.path(percentEncoded: false),
+          name: name,
+          detail: relativePath(from: repositoryRootURL, to: worktreeURL),
+          workingDirectory: worktreeURL,
+          repositoryRootURL: repositoryRootURL,
+          createdAt: nil,
+          isMissing: false,
+          isAttached: isAttached
+        )
+      )
+    }
+    return worktrees
+  }
+
+  /// Create a worktree via standard `git worktree add` (for remote repos where
+  /// the bundled `wt` shim isn't available). Creates a new branch `name` at
+  /// `worktreePath` from `baseRef` (omitted → current HEAD). Throws
+  /// `GitClientError` on failure (collision, bad ref, missing parent dir).
+  /// Callers typically reload to re-list over ssh rather than build a worktree
+  /// model from this directly.
+  nonisolated func createGitWorktree(
+    in repoRoot: URL,
+    name: String,
+    baseRef: String,
+    worktreePath: URL
+  ) async throws {
+    let rootPath = repoRoot.standardizedFileURL.path(percentEncoded: false)
+    let wtPath = worktreePath.standardizedFileURL.path(percentEncoded: false)
+    var arguments = ["-C", rootPath, "worktree", "add", wtPath, "-b", name]
+    if !baseRef.isEmpty {
+      arguments.append(baseRef)
+    }
+    _ = try await runGit(operation: .worktreeCreate, arguments: arguments)
   }
 
   // Backfill-only: never drop Supacode-owned locks here. Supacode-initiated
@@ -590,34 +674,23 @@ struct GitClient {
     return arguments
   }
 
-  nonisolated func branchName(for worktreeURL: URL) async -> String? {
-    let headURL = await MainActor.run {
-      GitWorktreeHeadResolver.headURL(
-        for: worktreeURL,
-        fileManager: .default
-      )
-    }
-    guard let headURL else {
-      return nil
-    }
+  /// Resolve the current branch via `git rev-parse --abbrev-ref HEAD` so it
+  /// works over any transport (local or SSH). Returns the short branch name,
+  /// `"HEAD"` for a detached head, or `nil` on error (not a repo / unreachable
+  /// host). Replaces the former local-HEAD-file read, which couldn't resolve a
+  /// remote worktree's branch.
+  nonisolated func symbolicHeadBranch(at worktreeURL: URL) async -> String? {
+    let path = worktreeURL.path(percentEncoded: false)
     guard
-      let line = try? String(contentsOf: headURL, encoding: .utf8)
-        .split(whereSeparator: \.isNewline)
-        .first
+      let output = try? await runGit(
+        operation: .symbolicHeadRef,
+        arguments: ["-C", path, "rev-parse", "--abbrev-ref", "HEAD"]
+      )
     else {
       return nil
     }
-    let trimmed = line.trimmingCharacters(in: .whitespacesAndNewlines)
-    let refPrefix = "ref:"
-    if trimmed.hasPrefix(refPrefix) {
-      let ref = trimmed.dropFirst(refPrefix.count).trimmingCharacters(in: .whitespaces)
-      let headsPrefix = "refs/heads/"
-      if ref.hasPrefix(headsPrefix) {
-        return String(ref.dropFirst(headsPrefix.count))
-      }
-      return String(ref)
-    }
-    return "HEAD"
+    let trimmed = output.trimmingCharacters(in: .whitespacesAndNewlines)
+    return trimmed.isEmpty ? nil : trimmed
   }
 
   nonisolated func lineChanges(at worktreeURL: URL) async -> (added: Int, removed: Int)? {

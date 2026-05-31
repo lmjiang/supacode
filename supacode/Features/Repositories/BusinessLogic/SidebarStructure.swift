@@ -177,8 +177,25 @@ struct SidebarStructure: Equatable, Sendable {
     }
   }
 
+  /// Whether a repository runs locally or on an SSH host. Drives the sidebar's
+  /// Local / Remote partition headers.
+  enum RepositoryLocality: String, Hashable, Sendable {
+    case local
+    case remote
+
+    var title: String {
+      switch self {
+      case .local: "Local"
+      case .remote: "Remote"
+      }
+    }
+  }
+
   enum Section: Equatable, Sendable, Identifiable {
     case highlight(kind: HighlightKind, rowIDs: [Worktree.ID])
+    /// Divider/title between the Local and Remote repository groups. Emitted
+    /// only when at least one remote repository exists.
+    case partitionHeader(kind: RepositoryLocality)
     case repository(repositoryID: Repository.ID, groups: [SidebarItemGroup])
     case folder(repositoryID: Repository.ID, rowID: Worktree.ID)
     case failedRepository(
@@ -192,6 +209,7 @@ struct SidebarStructure: Equatable, Sendable {
     var id: SectionID {
       switch self {
       case .highlight(let kind, _): .highlight(kind)
+      case .partitionHeader(let kind): .partitionHeader(kind)
       case .repository(let repositoryID, _): .repository(repositoryID)
       case .folder(let repositoryID, _): .folder(repositoryID)
       case .failedRepository(let repositoryID, _, _, _): .failedRepository(repositoryID)
@@ -201,6 +219,7 @@ struct SidebarStructure: Equatable, Sendable {
 
     enum SectionID: Hashable, Sendable {
       case highlight(HighlightKind)
+      case partitionHeader(RepositoryLocality)
       case repository(Repository.ID)
       case folder(Repository.ID)
       case failedRepository(Repository.ID)
@@ -399,7 +418,9 @@ extension RepositoriesFeature.Action {
       return []
 
     // Everything else is UI / effects / transient state, no cache touched.
-    case .task, .setOpenPanelPresented, .loadPersistedRepositories,
+    case .task, .setOpenPanelPresented, .setAddRemoteRepositoryPresented,
+      .loadRemoteOpenedRepositories, .remoteOpenedRepositoriesLoaded, .loadPersistedRepositories,
+      .addRemoteRepository, .removeRemoteRepository,
       .refreshWorktrees, .reloadRepositories,
       .setSidebarSelectedWorktreeIDs,
       .openRepositories,
@@ -576,18 +597,22 @@ extension RepositoriesFeature.State {
   }
 
   private func buildRepositorySections(hoisted: Set<Worktree.ID>) -> RepositorySectionsBuild {
-    var sections: [SidebarStructure.Section] = []
+    var localSections: [SidebarStructure.Section] = []
     var reorderableRepositoryIDs: [Repository.ID] = []
     let pendingIDsByRepo: [Repository.ID: Set<Worktree.ID>] = Dictionary(
       grouping: pendingWorktrees,
       by: \.repositoryID
     ).mapValues { Set($0.map(\.id)) }
 
+    // Local repositories. `orderedRepositoryRoots()` keys off the persisted
+    // local `repositoryRoots`; remote repos carry a host-keyed id that never
+    // matches `rootURL.path`, so they fall through `repositories[id:]` here and
+    // are rendered solely by the remote partition below.
     for rootURL in orderedRepositoryRoots() {
       let repositoryID = rootURL.standardizedFileURL.path(percentEncoded: false)
       if loadFailuresByID[repositoryID] != nil {
         let sectionEntry = sidebar.sections[repositoryID]
-        sections.append(
+        localSections.append(
           .failedRepository(
             repositoryID: repositoryID,
             rootURL: rootURL,
@@ -598,12 +623,12 @@ extension RepositoriesFeature.State {
         reorderableRepositoryIDs.append(repositoryID)
         continue
       }
-      guard let repository = repositories[id: repositoryID] else { continue }
+      guard let repository = repositories[id: repositoryID], repository.host == nil else { continue }
       reorderableRepositoryIDs.append(repositoryID)
       if !repository.isGitRepository {
         let folderRowID = Repository.folderWorktreeID(for: repository.rootURL)
         if !hoisted.contains(folderRowID) {
-          sections.append(.folder(repositoryID: repositoryID, rowID: folderRowID))
+          localSections.append(.folder(repositoryID: repositoryID, rowID: folderRowID))
         }
         continue
       }
@@ -614,7 +639,37 @@ extension RepositoriesFeature.State {
         hoistedRowIDs: hoisted,
         nestWorktreesByBranch: sidebarNestWorktreesByBranch && repository.isGitRepository
       )
-      sections.append(.repository(repositoryID: repositoryID, groups: groups))
+      localSections.append(.repository(repositoryID: repositoryID, groups: groups))
+    }
+
+    // Remote repositories (real git over SSH, host != nil). Rendered as their
+    // own partition in repositories order, as full git sections (worktree
+    // slots). Not reorderable: SSH repos aren't part of the local
+    // `repositoryRoots` move/persist machinery.
+    var remoteSections: [SidebarStructure.Section] = []
+    for repository in repositories where repository.host != nil {
+      let groups = SidebarItemGroup.computeSlots(
+        in: self,
+        repositoryID: repository.id,
+        pendingIDs: pendingIDsByRepo[repository.id] ?? [],
+        hoistedRowIDs: hoisted,
+        nestWorktreesByBranch: sidebarNestWorktreesByBranch
+      )
+      remoteSections.append(.repository(repositoryID: repository.id, groups: groups))
+    }
+
+    // Headers appear only when remote repos exist, so a purely-local sidebar is
+    // visually unchanged.
+    var sections: [SidebarStructure.Section] = []
+    if remoteSections.isEmpty {
+      sections = localSections
+    } else {
+      if !localSections.isEmpty {
+        sections.append(.partitionHeader(kind: .local))
+        sections.append(contentsOf: localSections)
+      }
+      sections.append(.partitionHeader(kind: .remote))
+      sections.append(contentsOf: remoteSections)
     }
     return RepositorySectionsBuild(sections: sections, reorderableRepositoryIDs: reorderableRepositoryIDs)
   }
@@ -686,7 +741,7 @@ extension RepositoriesFeature.State {
     var ids: [Worktree.ID] = []
     for section in sections {
       switch section {
-      case .highlight, .placeholder, .failedRepository:
+      case .highlight, .partitionHeader, .placeholder, .failedRepository:
         continue
       case .folder(_, let rowID):
         ids.append(rowID)

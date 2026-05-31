@@ -161,14 +161,28 @@ struct AgentPresenceFeature {
     let key = PresenceKey(agent: agent, surfaceID: event.surfaceID)
     switch event.eventName {
     case .sessionStart:
-      guard let pid = event.pid else { return [] }
+      guard let pid = event.pid else {
+        // OSC-origin (remote agent, no local pid): seed a pid-less record so
+        // the badge appears; subsequent activity events flip it.
+        guard state.records[key] == nil else { return [] }
+        state.records[key] = PresenceRecord(activity: .idle, pids: [])
+        rebuildPresence(forSurface: event.surfaceID, in: &state)
+        return [event.surfaceID]
+      }
       var record = state.records[key] ?? PresenceRecord(pids: [])
       let inserted = record.pids.insert(pid).inserted
       state.records[key] = record
       rebuildPresence(forSurface: event.surfaceID, in: &state)
       return inserted ? [event.surfaceID] : []
     case .sessionEnd:
-      guard let pid = event.pid, var record = state.records[key] else { return [] }
+      guard let pid = event.pid else {
+        // OSC-origin: clear only a pid-less record; never a local pid-bearing one.
+        guard let record = state.records[key], record.pids.isEmpty else { return [] }
+        state.records.removeValue(forKey: key)
+        rebuildPresence(forSurface: event.surfaceID, in: &state)
+        return [event.surfaceID]
+      }
+      guard var record = state.records[key] else { return [] }
       let removed = record.pids.remove(pid) != nil
       if record.pids.isEmpty {
         state.records.removeValue(forKey: key)
@@ -178,14 +192,33 @@ struct AgentPresenceFeature {
       rebuildPresence(forSurface: event.surfaceID, in: &state)
       return removed ? [event.surfaceID] : []
     case .busy:
-      return setActivity(.busy, for: key, in: &state) ? [event.surfaceID] : []
+      return applyActivity(.busy, event: event, key: key, into: &state) ? [event.surfaceID] : []
     case .awaitingInput:
-      return setActivity(.awaitingInput, for: key, in: &state) ? [event.surfaceID] : []
+      return applyActivity(.awaitingInput, event: event, key: key, into: &state) ? [event.surfaceID] : []
     case .idle:
-      return setActivity(.idle, for: key, in: &state) ? [event.surfaceID] : []
+      return applyActivity(.idle, event: event, key: key, into: &state) ? [event.surfaceID] : []
     case .notification, .none:
       return []
     }
+  }
+
+  /// Set activity on an existing record, or — for a pid-less OSC-origin event
+  /// with no record yet — lazily create a pid-less record. A pid-bearing event
+  /// with no record is a no-op (the session-start envelope creates it), so
+  /// local behavior is unchanged. Returns true when state changed.
+  private static func applyActivity(
+    _ activity: Activity,
+    event: AgentHookEvent,
+    key: PresenceKey,
+    into state: inout State
+  ) -> Bool {
+    if state.records[key] != nil {
+      return setActivity(activity, for: key, in: &state)
+    }
+    guard event.pid == nil else { return false }
+    state.records[key] = PresenceRecord(activity: activity, pids: [])
+    rebuildPresence(forSurface: event.surfaceID, in: &state)
+    return true
   }
 
   /// No-op on identical activity so repeated same-event hook bursts (e.g. consecutive

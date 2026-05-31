@@ -89,6 +89,13 @@ struct RepositoriesFeature {
     var loadFailuresByID: [Repository.ID: String] = [:]
     var selection: SidebarSelection?
     var isOpenPanelPresented = false
+    var isAddRemoteRepositoryPresented = false
+    /// Repo roots the picked host's own Supacode has open, read over ssh for the
+    /// Add-Remote sheet's pick-list. Keyed to `remoteOpenedReposHostDestination`
+    /// so a stale async result for a since-changed host is ignored.
+    var remoteOpenedRepoPaths: [String] = []
+    var isLoadingRemoteOpenedRepos = false
+    var remoteOpenedReposHostDestination: String?
     var isInitialLoadComplete = false
     var pendingWorktrees: [PendingWorktree] = []
     /// In-flight customization payloads, keyed by `(repositoryID, branchName)`
@@ -249,6 +256,11 @@ struct RepositoriesFeature {
     /// the view reads to assign ⌃1..⌃0 hotkeys).
     case sidebarNestByBranchChanged
     case setOpenPanelPresented(Bool)
+    case setAddRemoteRepositoryPresented(Bool)
+    case loadRemoteOpenedRepositories(RemoteHost)
+    case remoteOpenedRepositoriesLoaded(hostDestination: String, paths: [String])
+    case addRemoteRepository(RemoteRepositoryConfig)
+    case removeRemoteRepository(Repository.ID)
     case loadPersistedRepositories
     case refreshWorktrees
     case reloadRepositories(animated: Bool)
@@ -476,6 +488,15 @@ struct RepositoriesFeature {
   @Dependency(\.date.now) private var now
   @Dependency(\.uuid) private var uuid
 
+  /// Host-aware git client: the SSH flavor for a remote worktree (so branch /
+  /// diff lookups run on the host), the injected local client otherwise.
+  private func gitClient(for worktree: Worktree) -> GitClientDependency {
+    guard let host = worktree.host else {
+      return gitClient
+    }
+    return .ssh(host: host)
+  }
+
   var body: some Reducer<State, Action> {
     Reduce { state, action in
       switch action {
@@ -512,6 +533,56 @@ struct RepositoriesFeature {
       case .setOpenPanelPresented(let isPresented):
         state.isOpenPanelPresented = isPresented
         return .none
+
+      case .setAddRemoteRepositoryPresented(let isPresented):
+        state.isAddRemoteRepositoryPresented = isPresented
+        if !isPresented {
+          state.remoteOpenedRepoPaths = []
+          state.isLoadingRemoteOpenedRepos = false
+          state.remoteOpenedReposHostDestination = nil
+        }
+        return .none
+
+      case .loadRemoteOpenedRepositories(let host):
+        state.isLoadingRemoteOpenedRepos = true
+        state.remoteOpenedReposHostDestination = host.sshDestination
+        state.remoteOpenedRepoPaths = []
+        return .run { send in
+          let paths = await Self.loadRemoteOpenedRepoPaths(host: host)
+          await send(.remoteOpenedRepositoriesLoaded(hostDestination: host.sshDestination, paths: paths))
+        }
+
+      case .remoteOpenedRepositoriesLoaded(let hostDestination, let paths):
+        // Drop a stale result for a host the user already switched away from.
+        guard state.remoteOpenedReposHostDestination == hostDestination else { return .none }
+        state.isLoadingRemoteOpenedRepos = false
+        state.remoteOpenedRepoPaths = paths
+        return .none
+
+      case .addRemoteRepository(let config):
+        @Shared(.settingsFile) var settingsFile
+        $settingsFile.withLock { settings in
+          // De-dupe on (host, path) so re-adding the same remote is a no-op.
+          let exists = settings.global.remoteRepositories.contains {
+            $0.host.sshDestination == config.host.sshDestination
+              && $0.normalizedRemotePath == config.normalizedRemotePath
+          }
+          if !exists {
+            settings.global.remoteRepositories.append(config)
+          }
+        }
+        // Full reload so the new remote repo materializes even when there are
+        // no local roots (`reloadRepositories` early-returns on empty roots).
+        return .send(.loadPersistedRepositories)
+
+      case .removeRemoteRepository(let repositoryID):
+        @Shared(.settingsFile) var settingsFile
+        $settingsFile.withLock { settings in
+          settings.global.remoteRepositories.removeAll {
+            Self.remoteRepositoryID(for: $0) == repositoryID
+          }
+        }
+        return .send(.loadPersistedRepositories)
 
       case .loadPersistedRepositories:
         state.alert = nil
@@ -874,7 +945,11 @@ struct RepositoriesFeature {
         }
         @Shared(.repositorySettings(repository.rootURL)) var repositorySettings
         let selectedBaseRef = repositorySettings.worktreeBaseRef
-        let gitClient = gitClient
+        // Remote repos load the prompt's branch lists over ssh (host-aware
+        // client); local uses the injected client. The dialog loads these in
+        // the background, so the ssh round-trips (multiplexed over the warm
+        // ControlMaster) don't block presentation.
+        let gitClient = repository.host.map { GitClientDependency.ssh(host: $0) } ?? gitClient
         let rootURL = repository.rootURL
         // Resolve the cheap quick-picks (auto ref + matching local
         // branch) and present the prompt right away, then load the
@@ -1133,6 +1208,18 @@ struct RepositoriesFeature {
             state.dropPendingCustomization(repositoryID: repository.id, branchName: rejectedBranchName)
           }
           return .none
+        }
+        // Remote repos create worktrees over ssh via `git worktree add`, then
+        // reload to re-list. This bypasses the local pending/stream flow below,
+        // but honors the same name + base-ref choices from the prompt.
+        if let host = repository.host {
+          return remoteCreateWorktree(
+            repository: repository,
+            host: host,
+            nameSource: nameSource,
+            baseRefSource: baseRefSource,
+            fetchOrigin: fetchOrigin
+          )
         }
         if state.removingRepositoryIDs[repository.id] != nil {
           state.alert = messageAlert(
@@ -2371,6 +2458,12 @@ struct RepositoriesFeature {
         return state.setRowLifecycleEffect(worktreeID, .idle)
 
       case .requestDeleteRepository(let repositoryID):
+        // Remote repos aren't on disk locally — removing one just drops its
+        // persisted config + reloads; the remote files are untouched. No
+        // local-removal confirmation flow.
+        if state.repositories[id: repositoryID]?.host != nil {
+          return .send(.removeRemoteRepository(repositoryID))
+        }
         state.alert = confirmationAlertForRepositoryRemoval(repositoryID: repositoryID, state: state)
         return .none
 
@@ -2388,7 +2481,7 @@ struct RepositoriesFeature {
         // Drop persisted customization so re-adding the same path doesn't
         // silently restore the old title/color, matching the healthy-repo path.
         state.$sidebar.withLock { sidebar in
-          sidebar.sections.removeValue(forKey: repositoryID)
+          _ = sidebar.sections.removeValue(forKey: repositoryID)
         }
         state.dropStaleFailedRepositorySelection()
         return .run { send in
@@ -2800,7 +2893,7 @@ struct RepositoriesFeature {
             return .none
           }
           let worktreeURL = worktree.workingDirectory
-          let gitClient = gitClient
+          let gitClient = gitClient(for: worktree)
           return .run { send in
             if let name = await gitClient.branchName(worktreeURL) {
               await send(.worktreeBranchNameLoaded(worktreeID: worktreeID, name: name))
@@ -2811,7 +2904,7 @@ struct RepositoriesFeature {
             return .none
           }
           let worktreeURL = worktree.workingDirectory
-          let gitClient = gitClient
+          let gitClient = gitClient(for: worktree)
           return .run { send in
             if let changes = await gitClient.lineChanges(worktreeURL) {
               await send(
@@ -2828,6 +2921,11 @@ struct RepositoriesFeature {
           guard let firstWorktree = worktrees.first,
             let repositoryID = state.repositoryID(containing: firstWorktree.id)
           else {
+            return .none
+          }
+          // PR refresh runs `gh` against the local repo; a remote-only repo has
+          // no local checkout to serve it. Skip (gh-over-ssh is out of scope).
+          guard state.repositories[id: repositoryID]?.host == nil else {
             return .none
           }
           var seen = Set<String>()
@@ -3829,7 +3927,11 @@ struct RepositoriesFeature {
         loaded.append(repository)
       }
     }
-    return (loaded, failures)
+    // Remote repositories are appended on every load path (they don't live in
+    // `repositoryRoots`, so `reload`/`open`/removal would otherwise drop them).
+    // Loaded as real git over SSH; host-keyed ids never collide with `loaded`.
+    let remoteRepositories = await Self.loadRemoteRepositories(Self.persistedRemoteRepositoryConfigs())
+    return (loaded + remoteRepositories, failures)
   }
 
   /// Customization transfer record produced by `prunedPendingWorktrees` and

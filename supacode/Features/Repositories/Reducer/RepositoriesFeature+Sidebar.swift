@@ -154,7 +154,16 @@ extension RepositoriesFeature {
   static func rebuildSidebarGrouping(_ state: inout State) {
     var buckets: OrderedDictionary<Repository.ID, SidebarGrouping.BucketGrouping> = [:]
 
-    for repositoryID in state.orderedRepositoryIDs() {
+    // Local repos in user order, then remote repos (which aren't in
+    // `repositoryRoots`/`orderedRepositoryIDs`). Bucket lookup is by id, so the
+    // ordering here doesn't affect rendering — it only needs to cover every
+    // repo so remote git repos get a grouping bucket for `computeSlots`.
+    var orderedIDs = state.orderedRepositoryIDs()
+    let coveredIDs = Set(orderedIDs)
+    for repository in state.repositories where repository.host != nil && !coveredIDs.contains(repository.id) {
+      orderedIDs.append(repository.id)
+    }
+    for repositoryID in orderedIDs {
       guard let repository = state.repositories[id: repositoryID] else { continue }
       var bucket = SidebarGrouping.BucketGrouping()
       var pinned: [SidebarItemID] = []

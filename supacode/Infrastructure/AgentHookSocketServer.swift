@@ -396,7 +396,10 @@ final class AgentHookSocketServer {
     )
   }
 
-  private nonisolated static func parseNotification(
+  /// Decode an agent's notification payload (the hook JSON) into title/body.
+  /// Shared with the in-band OSC notification path (`GhosttySurfaceBridge` →
+  /// `WorktreeTerminalState`) so socket and OSC delivery parse identically.
+  nonisolated static func parseNotification(
     agent: String,
     data: Data
   ) -> AgentHookNotification? {
@@ -524,6 +527,27 @@ nonisolated struct AgentHookEvent: Equatable, Sendable, Decodable {
       socketLogger.warning("Failed to decode \(event) data as \(type): \(error)")
       return nil
     }
+  }
+
+  /// Memberwise init for synthesizing an event from a non-socket source (e.g. an
+  /// in-band presence OSC parsed off the terminal stream), where there is no
+  /// local pid.
+  init(
+    version: Int = 1,
+    agent: String,
+    event: String,
+    surfaceID: UUID,
+    pid: pid_t? = nil,
+    timestamp: Date? = nil,
+    data: JSONValue? = nil
+  ) {
+    self.version = version
+    self.agent = agent
+    self.event = event
+    self.surfaceID = surfaceID
+    self.pid = pid
+    self.timestamp = timestamp
+    self.data = data
   }
 
   private enum CodingKeys: String, CodingKey {
