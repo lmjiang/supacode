@@ -38,8 +38,19 @@ struct SidebarView: View {
     )
     .toolbar {
       ToolbarItem(placement: .primaryAction) {
-        Button {
-          store.send(.setOpenPanelPresented(true))
+        Menu {
+          Button {
+            store.send(.setOpenPanelPresented(true))
+          } label: {
+            Label("Repository or Folder…", systemImage: "folder.badge.plus")
+          }
+          .help("Add a local repository or folder (\(openRepo?.display ?? "none"))")
+          Button {
+            store.send(.setAddRemoteRepositoryPresented(true))
+          } label: {
+            Label("Remote Repository…", systemImage: "network")
+          }
+          .help("Add a repository on an SSH host")
         } label: {
           Label {
             Text("Add…")
@@ -49,8 +60,16 @@ struct SidebarView: View {
               .accessibilityHidden(true)
           }
         }
+        .menuIndicator(.hidden)
         .labelStyle(.iconOnly)
-        .help("Add Repository or Folder (\(openRepo?.display ?? "none"))")
+        .help("Add Repository, Folder, or Remote")
+      }
+    }
+    .sheet(
+      isPresented: $store.isAddRemoteRepositoryPresented.sending(\.setAddRemoteRepositoryPresented)
+    ) {
+      AddRemoteRepositorySheet(store: store) { config in
+        store.send(.addRemoteRepository(config))
       }
     }
     .focusedSceneAction(

@@ -89,6 +89,71 @@ struct AgentHookCommandTests {
     #expect(command.contains("$SUPACODE_SURFACE_ID"))
   }
 
+  // MARK: - In-band presence OSC.
+
+  @Test func compositeEmitsPresenceOSCToTtyGuardedBySurfaceID() {
+    let command = AgentHookSettingsCommand.compositeCommand(
+      events: [.awaitingInput], forwardStdinAsNotification: false, agent: .claude)
+    // OSC 9 carrying the sentinel payload, written to the controlling tty.
+    #expect(command.contains(#"]9;supacode-presence;v1;claude;awaiting_input"#))
+    #expect(command.contains(">/dev/tty"))
+    // Guarded by SURFACE_ID only, so it fires on a remote host with no socket.
+    #expect(command.contains(#"[ -n "${SUPACODE_SURFACE_ID:-}" ]"#))
+  }
+
+  @Test func presenceOSCIsIndependentOfTheSocketGuard() {
+    let command = AgentHookSettingsCommand.compositeCommand(
+      events: [.awaitingInput], forwardStdinAsNotification: false, agent: .claude)
+    // The OSC step precedes the socket envelope, so the socket `envCheck`
+    // (which requires SUPACODE_SOCKET_PATH) can't gate it — remote still fires.
+    let oscIndex = try? #require(command.range(of: "]9;supacode-presence")).lowerBound
+    let socketIndex = try? #require(command.range(of: "SUPACODE_SOCKET_PATH")).lowerBound
+    #expect(oscIndex != nil && socketIndex != nil && oscIndex! < socketIndex!)
+  }
+
+  @Test func agentPresenceOSCParsesValidPayload() {
+    let parsed = AgentPresenceOSC.parse(payload: "supacode-presence;v1;claude;awaiting_input")
+    #expect(parsed?.agent == .claude)
+    #expect(parsed?.event == "awaiting_input")
+  }
+
+  @Test func agentPresenceOSCRejectsMalformedPayloads() {
+    #expect(AgentPresenceOSC.parse(payload: "nope;v1;claude;busy") == nil)
+    #expect(AgentPresenceOSC.parse(payload: "supacode-presence;v2;claude;busy") == nil)
+    #expect(AgentPresenceOSC.parse(payload: "supacode-presence;v1;ghost;busy") == nil)
+    #expect(AgentPresenceOSC.parse(payload: "supacode-presence;v1;claude") == nil)
+    #expect(AgentPresenceOSC.parse(payload: "Build finished") == nil)
+  }
+
+  // MARK: - In-band notification OSC (remote bell).
+
+  @Test func notifyHookEmitsRemoteOnlyNotifyOSCWithStashedPayload() {
+    let command = AgentHookSettingsCommand.compositeCommand(
+      events: [.idle], forwardStdinAsNotification: true, agent: .claude)
+    #expect(command.contains(#"]9;supacode-notify;v1;claude;"#))
+    #expect(command.contains("base64"))
+    // Remote-only: emitted only when the local socket is unreachable, so the
+    // bell never double-rings locally (the socket delivers it there).
+    #expect(command.contains(#"[ -z "${SUPACODE_SOCKET_PATH:-}" ]"#))
+    // stdin is stashed once at the top level for both the socket and the OSC leg.
+    #expect(command.contains("payload=$(cat)"))
+  }
+
+  @Test func agentPresenceOSCParseNotifyRoundTripsBase64() {
+    let raw = Data(#"{"event":"notification","message":"needs input"}"#.utf8)
+    let parsed = AgentPresenceOSC.parseNotify(
+      payload: "supacode-notify;v1;claude;\(raw.base64EncodedString())")
+    #expect(parsed?.agent == .claude)
+    #expect(parsed?.data == raw)
+  }
+
+  @Test func agentPresenceOSCParseNotifyRejectsMalformed() {
+    #expect(AgentPresenceOSC.parseNotify(payload: "supacode-presence;v1;claude;aGk=") == nil)
+    #expect(AgentPresenceOSC.parseNotify(payload: "supacode-notify;v2;claude;aGk=") == nil)
+    #expect(AgentPresenceOSC.parseNotify(payload: "supacode-notify;v1;ghost;aGk=") == nil)
+    #expect(AgentPresenceOSC.parseNotify(payload: "supacode-notify;v1;claude;not_base64!") == nil)
+  }
+
   // MARK: - Command ownership.
 
   @Test func currentCommandIsRecognized() {
@@ -240,7 +305,9 @@ struct AgentHookCommandTests {
       events: [.busy], forwardStdinAsNotification: false, agent: .claude
     )
     let expected =
-      #"[ -n "${SUPACODE_SOCKET_PATH:-}" ] && [ -n "${SUPACODE_WORKTREE_ID:-}" ] "#
+      #"{ [ -n "${SUPACODE_SURFACE_ID:-}" ] && "#
+      + #"printf '\033]9;supacode-presence;v1;claude;busy\a' >/dev/tty 2>/dev/null; } || true; "#
+      + #"[ -n "${SUPACODE_SOCKET_PATH:-}" ] && [ -n "${SUPACODE_WORKTREE_ID:-}" ] "#
       + #"&& [ -n "${SUPACODE_TAB_ID:-}" ] && [ -n "${SUPACODE_SURFACE_ID:-}" ] && "#
       + #"printf '%s' "{\"event\":\"busy\",\"v\":1,\"agent\":\"claude\","#
       + #"\"surface_id\":\"$SUPACODE_SURFACE_ID\",\"pid\":$PPID}" "#
@@ -253,10 +320,15 @@ struct AgentHookCommandTests {
       events: [.idle], forwardStdinAsNotification: true, agent: .claude
     )
     let expected =
-      #"[ -n "${SUPACODE_SOCKET_PATH:-}" ] && [ -n "${SUPACODE_WORKTREE_ID:-}" ] "#
+      #"{ [ -n "${SUPACODE_SURFACE_ID:-}" ] && "#
+      + #"printf '\033]9;supacode-presence;v1;claude;idle\a' >/dev/tty 2>/dev/null; } || true; "#
+      + #"payload=$(cat); "#
+      + #"{ [ -n "${SUPACODE_SURFACE_ID:-}" ] && [ -z "${SUPACODE_SOCKET_PATH:-}" ] && "#
+      + #"printf '\033]9;supacode-notify;v1;claude;%s\a' "#
+      + #""$(printf '%s' "$payload" | base64 | tr -d '\n')" >/dev/tty 2>/dev/null; } || true; "#
+      + #"[ -n "${SUPACODE_SOCKET_PATH:-}" ] && [ -n "${SUPACODE_WORKTREE_ID:-}" ] "#
       + #"&& [ -n "${SUPACODE_TAB_ID:-}" ] && [ -n "${SUPACODE_SURFACE_ID:-}" ] && "#
-      + #"{ payload=$(cat); "#
-      + #"printf '%s' "{\"event\":\"idle\",\"v\":1,\"agent\":\"claude\","#
+      + #"{ printf '%s' "{\"event\":\"idle\",\"v\":1,\"agent\":\"claude\","#
       + #"\"surface_id\":\"$SUPACODE_SURFACE_ID\",\"pid\":$PPID}" "#
       + #"| /usr/bin/nc -U -w1 "$SUPACODE_SOCKET_PATH"; "#
       + #"{ printf '%s claude\n' "$SUPACODE_WORKTREE_ID $SUPACODE_TAB_ID $SUPACODE_SURFACE_ID"; "#
@@ -274,7 +346,11 @@ struct AgentHookCommandTests {
       events: [.sessionEnd, .idle], forwardStdinAsNotification: false, agent: .claude
     )
     let expected =
-      #"[ -n "${SUPACODE_SOCKET_PATH:-}" ] && [ -n "${SUPACODE_WORKTREE_ID:-}" ] "#
+      #"{ [ -n "${SUPACODE_SURFACE_ID:-}" ] && "#
+      + #"printf '\033]9;supacode-presence;v1;claude;session_end\a' >/dev/tty 2>/dev/null; } || true; "#
+      + #"{ [ -n "${SUPACODE_SURFACE_ID:-}" ] && "#
+      + #"printf '\033]9;supacode-presence;v1;claude;idle\a' >/dev/tty 2>/dev/null; } || true; "#
+      + #"[ -n "${SUPACODE_SOCKET_PATH:-}" ] && [ -n "${SUPACODE_WORKTREE_ID:-}" ] "#
       + #"&& [ -n "${SUPACODE_TAB_ID:-}" ] && [ -n "${SUPACODE_SURFACE_ID:-}" ] && "#
       + #"{ printf '%s' "{\"event\":\"session_end\",\"v\":1,\"agent\":\"claude\","#
       + #"\"surface_id\":\"$SUPACODE_SURFACE_ID\",\"pid\":$PPID}" "#
@@ -293,10 +369,15 @@ struct AgentHookCommandTests {
       events: [.idle], forwardStdinAsNotification: true, agent: .codex
     )
     let expected =
-      #"[ -n "${SUPACODE_SOCKET_PATH:-}" ] && [ -n "${SUPACODE_WORKTREE_ID:-}" ] "#
+      #"{ [ -n "${SUPACODE_SURFACE_ID:-}" ] && "#
+      + #"printf '\033]9;supacode-presence;v1;codex;idle\a' >/dev/tty 2>/dev/null; } || true; "#
+      + #"payload=$(cat); "#
+      + #"{ [ -n "${SUPACODE_SURFACE_ID:-}" ] && [ -z "${SUPACODE_SOCKET_PATH:-}" ] && "#
+      + #"printf '\033]9;supacode-notify;v1;codex;%s\a' "#
+      + #""$(printf '%s' "$payload" | base64 | tr -d '\n')" >/dev/tty 2>/dev/null; } || true; "#
+      + #"[ -n "${SUPACODE_SOCKET_PATH:-}" ] && [ -n "${SUPACODE_WORKTREE_ID:-}" ] "#
       + #"&& [ -n "${SUPACODE_TAB_ID:-}" ] && [ -n "${SUPACODE_SURFACE_ID:-}" ] && "#
-      + #"{ payload=$(cat); "#
-      + #"printf '%s' "{\"event\":\"idle\",\"v\":1,\"agent\":\"codex\","#
+      + #"{ printf '%s' "{\"event\":\"idle\",\"v\":1,\"agent\":\"codex\","#
       + #"\"surface_id\":\"$SUPACODE_SURFACE_ID\",\"pid\":$PPID}" "#
       + #"| /usr/bin/nc -U -w1 "$SUPACODE_SOCKET_PATH"; "#
       + #"{ printf '%s codex\n' "$SUPACODE_WORKTREE_ID $SUPACODE_TAB_ID $SUPACODE_SURFACE_ID"; "#
@@ -310,10 +391,15 @@ struct AgentHookCommandTests {
       events: [.idle], forwardStdinAsNotification: true, agent: .kiro
     )
     let expected =
-      #"[ -n "${SUPACODE_SOCKET_PATH:-}" ] && [ -n "${SUPACODE_WORKTREE_ID:-}" ] "#
+      #"{ [ -n "${SUPACODE_SURFACE_ID:-}" ] && "#
+      + #"printf '\033]9;supacode-presence;v1;kiro;idle\a' >/dev/tty 2>/dev/null; } || true; "#
+      + #"payload=$(cat); "#
+      + #"{ [ -n "${SUPACODE_SURFACE_ID:-}" ] && [ -z "${SUPACODE_SOCKET_PATH:-}" ] && "#
+      + #"printf '\033]9;supacode-notify;v1;kiro;%s\a' "#
+      + #""$(printf '%s' "$payload" | base64 | tr -d '\n')" >/dev/tty 2>/dev/null; } || true; "#
+      + #"[ -n "${SUPACODE_SOCKET_PATH:-}" ] && [ -n "${SUPACODE_WORKTREE_ID:-}" ] "#
       + #"&& [ -n "${SUPACODE_TAB_ID:-}" ] && [ -n "${SUPACODE_SURFACE_ID:-}" ] && "#
-      + #"{ payload=$(cat); "#
-      + #"printf '%s' "{\"event\":\"idle\",\"v\":1,\"agent\":\"kiro\","#
+      + #"{ printf '%s' "{\"event\":\"idle\",\"v\":1,\"agent\":\"kiro\","#
       + #"\"surface_id\":\"$SUPACODE_SURFACE_ID\",\"pid\":$PPID}" "#
       + #"| /usr/bin/nc -U -w1 "$SUPACODE_SOCKET_PATH"; "#
       + #"{ printf '%s kiro\n' "$SUPACODE_WORKTREE_ID $SUPACODE_TAB_ID $SUPACODE_SURFACE_ID"; "#

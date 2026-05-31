@@ -1,3 +1,5 @@
+import Foundation
+
 /// Hook events emitted via the JSON envelope path. Activity events
 /// (`busy`, `awaitingInput`, `idle`) are atomic state-set. Each fires
 /// the corresponding (surface, agent) activity directly; repeated events
@@ -68,21 +70,69 @@ nonisolated enum AgentHookSettingsCommand {
       !events.isEmpty || forwardStdinAsNotification,
       "compositeCommand needs at least one side-effect (events or stdin forward).",
     )
+    // In-band OSC steps run BEFORE the socket command so the ownership sentinel
+    // (appended by `managed`) stays at the very end for `AgentHookCommandOwnership`.
+    // Presence OSC mirrors every event; when forwarding a notification, stash the
+    // stdin payload once and emit a remote-only notify OSC so the bell rings over
+    // zmx+ssh — skipped locally (socket delivers it) so it never double-rings.
+    var prefix = events.map { presenceOSC(event: $0, agent: agent) }
+    if forwardStdinAsNotification {
+      prefix.append("payload=$(cat)")
+      prefix.append(notifyOSC(agent: agent))
+    }
+    let socket = socketCommand(
+      events: events, forwardStdinAsNotification: forwardStdinAsNotification, agent: agent)
+    return (prefix + [socket]).joined(separator: "; ")
+  }
+
+  /// The out-of-band Unix-socket leg (unchanged behavior): one envelope per
+  /// event plus an optional stdin-forwarded notification, under the socket
+  /// `envCheck` guard with the trailing ownership sentinel.
+  private static func socketCommand(
+    events: [HookEvent],
+    forwardStdinAsNotification: Bool,
+    agent: SkillAgent
+  ) -> String {
     if events.count == 1, !forwardStdinAsNotification {
       return managed(envelopePipeline(event: events[0], agent: agent))
     }
     if events.isEmpty, forwardStdinAsNotification {
-      return managed(notifyPipeline(agent: agent, payloadExpr: nil))
+      return managed(notifyPipeline(agent: agent))
     }
-    var steps: [String] = []
-    if forwardStdinAsNotification { steps.append("payload=$(cat)") }
-    for event in events {
-      steps.append(envelopePipeline(event: event, agent: agent))
-    }
+    var steps = events.map { envelopePipeline(event: $0, agent: agent) }
     if forwardStdinAsNotification {
-      steps.append(notifyPipeline(agent: agent, payloadExpr: #""$payload""#))
+      steps.append(notifyPipeline(agent: agent))
     }
     return managed("{ \(steps.joined(separator: "; ")); }")
+  }
+
+  /// In-band presence signal: an OSC 9 sequence carrying a Supacode sentinel,
+  /// written to the controlling tty so it rides the terminal data stream and
+  /// survives zmx + ssh (where the Unix socket is unreachable). Guarded by
+  /// `SUPACODE_SURFACE_ID` alone — independent of the socket `envCheck` so it
+  /// still fires on a remote host (no `SUPACODE_SOCKET_PATH` there), yet never
+  /// in a user's plain terminal outside a Supacode surface. A missing
+  /// controlling tty fails the `printf` harmlessly (`|| true`).
+  static func presenceOSC(event: HookEvent, agent: SkillAgent) -> String {
+    let osc =
+      #"printf '\033]9;\#(AgentPresenceOSC.sentinel);\#(AgentPresenceOSC.version);"#
+      + #"\#(agent.rawValue);\#(event.rawValue)\a'"#
+    return #"{ [ -n "${SUPACODE_SURFACE_ID:-}" ] && \#(osc) >/dev/tty 2>/dev/null; } || true"#
+  }
+
+  /// Remote-only in-band notification: when there's no reachable local socket
+  /// (`SUPACODE_SOCKET_PATH` unset → a remote host), carry the stashed
+  /// notification payload as a base64 OSC 9 so the bell still rings on the local
+  /// app over zmx+ssh. Skipped locally (the socket delivers it) so it never
+  /// double-rings; base64 sidesteps escaping, and the bridge reuses the socket's
+  /// notification parser to decode it. Reads `$payload` (stashed by the caller).
+  static func notifyOSC(agent: SkillAgent) -> String {
+    let osc =
+      #"printf '\033]9;\#(AgentPresenceOSC.notifySentinel);\#(AgentPresenceOSC.version);\#(agent.rawValue);%s\a' "#
+      + #""$(printf '%s' "$payload" | base64 | tr -d '\n')""#
+    return
+      #"{ [ -n "${SUPACODE_SURFACE_ID:-}" ] && [ -z "${SUPACODE_SOCKET_PATH:-}" ] && "#
+      + #"\#(osc) >/dev/tty 2>/dev/null; } || true"#
   }
 
   private static func envelopePipeline(event: HookEvent, agent: SkillAgent) -> String {
@@ -93,18 +143,48 @@ nonisolated enum AgentHookSettingsCommand {
     return #"printf '%s' "\#(envelope)" | /usr/bin/nc -U -w1 "$SUPACODE_SOCKET_PATH""#
   }
 
-  /// `payloadExpr == nil` → forward stdin live via `cat`. Non-nil → relay
-  /// a previously-stashed shell expression (so the composite path can
-  /// consume stdin once and reuse it after event envelopes).
-  private static func notifyPipeline(agent: SkillAgent, payloadExpr: String?) -> String {
-    let body: String
-    if let payloadExpr {
-      body = #"printf '%s' \#(payloadExpr)"#
-    } else {
-      body = "cat"
-    }
-    return
-      #"{ printf '%s \#(agent.rawValue)\n' "\#(ids)"; \#(body); }"#
-      + #" | /usr/bin/nc -U -w1 "$SUPACODE_SOCKET_PATH""#
+  /// Relays the stashed `$payload` (the agent's notification JSON, captured once
+  /// at the top of the composite command) to the socket server.
+  private static func notifyPipeline(agent: SkillAgent) -> String {
+    #"{ printf '%s \#(agent.rawValue)\n' "\#(ids)"; printf '%s' "$payload"; }"#
+    + #" | /usr/bin/nc -U -w1 "$SUPACODE_SOCKET_PATH""#
+  }
+}
+
+/// Shared definition of the in-band agent-presence OSC, used by the hook
+/// command builder (to emit) and the app's terminal bridge (to parse), so the
+/// two ends share one sentinel and can't drift. The signal rides OSC 9 on the
+/// terminal data stream, surfacing app-side as a desktop notification that the
+/// bridge intercepts (see `GhosttySurfaceBridge`).
+public nonisolated enum AgentPresenceOSC {
+  /// Discriminator (first payload field) marking a Supacode presence signal,
+  /// vs a genuine desktop notification.
+  public static let sentinel = "supacode-presence"
+  /// Discriminator for a remote-forwarded notification (vs presence / a genuine
+  /// desktop notification). Its payload field is base64-encoded hook JSON.
+  public static let notifySentinel = "supacode-notify"
+  public static let version = "v1"
+
+  /// Parse the OSC 9 payload `supacode-presence;v1;<agent>;<event>`. Returns the
+  /// agent and the raw event name (validated against the app's event enum by the
+  /// caller). Nil on sentinel/version mismatch or unknown agent.
+  public static func parse(payload: String) -> (agent: SkillAgent, event: String)? {
+    let fields = payload.split(separator: ";", omittingEmptySubsequences: false).map(String.init)
+    guard fields.count == 4, fields[0] == sentinel, fields[1] == version,
+      let agent = SkillAgent(rawValue: fields[2])
+    else { return nil }
+    return (agent, fields[3])
+  }
+
+  /// Parse the OSC 9 payload `supacode-notify;v1;<agent>;<base64-json>`. Returns
+  /// the agent and the decoded notification payload bytes (the agent's hook
+  /// JSON). Nil on sentinel/version mismatch, unknown agent, or bad base64.
+  public static func parseNotify(payload: String) -> (agent: SkillAgent, data: Data)? {
+    let fields = payload.split(separator: ";", omittingEmptySubsequences: false).map(String.init)
+    guard fields.count == 4, fields[0] == notifySentinel, fields[1] == version,
+      let agent = SkillAgent(rawValue: fields[2]),
+      let data = Data(base64Encoded: fields[3])
+    else { return nil }
+    return (agent, data)
   }
 }

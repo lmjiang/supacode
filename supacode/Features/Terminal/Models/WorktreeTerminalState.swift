@@ -145,6 +145,11 @@ final class WorktreeTerminalState {
   /// active surface (selected tab) or worst-of-all (unselected tabs) so the
   /// stripe stays in lock-step with focus and OSC-9 progress mutations.
   var onTabProgressDisplayChanged: ((TerminalTabID, TerminalTabProgressDisplay?) -> Void)?
+  /// Forwards an in-band agent presence signal (parsed off the terminal OSC
+  /// stream) to the manager, which routes it through the same hook-event path
+  /// as the local Unix socket. Carries the agent identity from the OSC; the
+  /// surface id is supplied here from the receiving surface.
+  var onAgentHookEvent: ((AgentHookEvent) -> Void)?
 
   init(
     runtime: GhosttyRuntime,
@@ -899,7 +904,6 @@ final class WorktreeTerminalState {
   }
 
   func dismissNotification(_ notificationID: WorktreeTerminalNotification.ID) {
-    let previousHasUnseen = hasUnseenNotification
     let affectedSurface = notifications.first(where: { $0.id == notificationID })?.surfaceID
     notifications.removeAll { $0.id == notificationID }
     if let affectedSurface {
@@ -908,15 +912,22 @@ final class WorktreeTerminalState {
         emitTabProjection(for: tabId)
       }
     }
-    emitNotificationIndicatorIfNeeded(previousHasUnseen: previousHasUnseen)
+    // Removing a notification changes the row's notification LIST even when no
+    // unseen flag flips (it was already read), so refresh the row projection
+    // unconditionally. The gated `emitNotificationIndicatorIfNeeded` would skip
+    // it for an already-read notification and leave the toolbar bell stuck
+    // showing the dismissed entry. `emitProjection` is equality-gated downstream.
+    onNotificationIndicatorChanged?()
   }
 
   func dismissAllNotifications() {
-    let previousHasUnseen = hasUnseenNotification
     notifications.removeAll()
     clearAllSurfaceUnseenFlags()
     emitAllTabProjections()
-    emitNotificationIndicatorIfNeeded(previousHasUnseen: previousHasUnseen)
+    // See `dismissNotification`: always refresh the row projection so the
+    // toolbar bell clears even when every dismissed notification was already
+    // read (no unseen-flag flip to trigger the gated indicator emit).
+    onNotificationIndicatorChanged?()
   }
 
   /// Recomputes the surface's unseen flag through the canonical predicate so a
@@ -1338,10 +1349,17 @@ final class WorktreeTerminalState {
       initialInput: initialInput,
       bypassZmx: bypassZmx
     )
+    // Remote worktrees have no local working directory: the surface command is
+    // an `ssh …` line (see `resolveZmxWrapping`) and the cwd lives on the
+    // remote, so leave `working_directory` nil and let the remote shell `cd`.
+    let resolvedWorkingDirectory: URL? =
+      worktree.host == nil
+      ? (workingDirectoryOverride ?? inherited.workingDirectory ?? worktree.workingDirectory)
+      : nil
     let view = GhosttySurfaceView(
       id: surfaceID,
       runtime: runtime,
-      workingDirectory: workingDirectoryOverride ?? inherited.workingDirectory ?? worktree.workingDirectory,
+      workingDirectory: resolvedWorkingDirectory,
       command: resolvedCommand,
       initialInput: resolvedInitialInput,
       environmentVariables: surfaceEnvironment(tabId: tabId, surfaceID: surfaceID),
@@ -1409,6 +1427,7 @@ final class WorktreeTerminalState {
       guard let self, let view else { return }
       self.appendNotification(title: title, body: body, surfaceID: view.id)
     }
+    wireAgentSignalCallbacks(view: view)
     view.bridge.onCloseRequest = { [weak self, weak view] processAlive in
       guard let self, let view else { return }
       self.handleCloseRequest(for: view, processAlive: processAlive)
@@ -1438,10 +1457,41 @@ final class WorktreeTerminalState {
       return (command, initialInput)
     }
     let sessionID = ZmxSessionID.make(surfaceID: surfaceID)
+    // Remote worktree: launch zmx on the host over SSH. zmx is authoritative for
+    // attach-vs-create remotely just as it is locally, so the surface command is
+    // always the remote attach line (no local budget probe / bundle path). When
+    // the caller has no explicit command, default to cd-into-the-remote-dir so a
+    // freshly created session lands in the project directory.
+    if let host = worktree.host {
+      let userCommand =
+        command
+        ?? Self.remoteDefaultShellCommand(remotePath: worktree.workingDirectory.path(percentEncoded: false))
+      return (
+        ZmxAttach.buildRemoteCommand(
+          host: host,
+          sessionID: sessionID,
+          userCommand: userCommand,
+          surfaceID: surfaceID
+        ),
+        initialInput
+      )
+    }
     guard let wrapped = zmxClient.wrapCommand(sessionID, command) else {
       return (command, initialInput)
     }
     return (wrapped, initialInput)
+  }
+
+  /// Default command for a remote worktree surface with no explicit command:
+  /// `cd` into the remote project dir, then exec a login shell. The `cd` failure
+  /// is swallowed so a stale path still drops the user into a usable shell. Nil
+  /// for an empty/root path so we just attach the default shell. The path is
+  /// single-quoted for the remote shell (which re-parses the attach string).
+  static func remoteDefaultShellCommand(remotePath: String) -> String? {
+    let trimmed = remotePath.trimmingCharacters(in: .whitespacesAndNewlines)
+    guard !trimmed.isEmpty, trimmed != "/" else { return nil }
+    let quoted = "'" + trimmed.replacing("'", with: "'\\''") + "'"
+    return "cd \(quoted) 2>/dev/null; exec \"$SHELL\" -l"
   }
 
   private struct InheritedSurfaceConfig: Equatable {
@@ -1539,6 +1589,44 @@ final class WorktreeTerminalState {
       recentHookBySurfaceID[surfaceID] = (text: normalized, recordedAt: now)
     }
     appendNotification(title: title, body: body, surfaceID: surfaceID, fromHook: true)
+  }
+
+  /// Synthesize a hook event from an in-band presence OSC and forward it to the
+  /// manager's hook-event path (`pid: nil` — there's no local pid for a remote
+  /// agent; the presence reducer creates a pid-less record). The surface id is
+  /// the receiving surface, mirroring how the socket envelope is attributed.
+  private func dispatchPresenceSignal(
+    agent: SkillAgent,
+    event: AgentHookEvent.EventName,
+    surfaceID: UUID
+  ) {
+    onAgentHookEvent?(
+      AgentHookEvent(agent: agent.rawValue, event: event.rawValue, surfaceID: surfaceID)
+    )
+  }
+
+  /// Wires the in-band agent presence + notification OSC callbacks. Extracted
+  /// from `wireSurfaceCallbacks` so each stays a small, surface-scoped closure.
+  private func wireAgentSignalCallbacks(view: GhosttySurfaceView) {
+    view.bridge.onPresenceSignal = { [weak self, weak view] agent, event in
+      guard let self, let view else { return }
+      self.dispatchPresenceSignal(agent: agent, event: event, surfaceID: view.id)
+    }
+    view.bridge.onAgentNotification = { [weak self, weak view] agent, payload in
+      guard let self, let view else { return }
+      self.handleRemoteAgentNotification(agent: agent, payload: payload, surfaceID: view.id)
+    }
+  }
+
+  /// A remote agent's hook notification, forwarded in-band over OSC (the local
+  /// socket can't cross ssh). Decoded with the same parser as the socket path
+  /// and routed through `appendHookNotification`, so it records the dedup
+  /// watermark and rings exactly like a local hook notification.
+  private func handleRemoteAgentNotification(agent: SkillAgent, payload: Data, surfaceID: UUID) {
+    guard let note = AgentHookSocketServer.parseNotification(agent: agent.rawValue, data: payload) else {
+      return
+    }
+    appendHookNotification(title: note.title ?? "", body: note.body ?? "", surfaceID: surfaceID)
   }
 
   private func appendNotification(

@@ -12,19 +12,25 @@ struct Repository: Identifiable, Hashable, Sendable {
   // a non-git folder. Persistence is unchanged; this flips freely on
   // reload when the directory is (un)initialized as a git repo.
   let isGitRepository: Bool
+  /// SSH host this repository lives on, or `nil` for a local repository.
+  /// Drives the sidebar's Local/Remote partition; every worktree of a
+  /// remote repository carries the same `host` (see Phase A terminal launch).
+  let host: RemoteHost?
 
   init(
     id: String,
     rootURL: URL,
     name: String,
     worktrees: IdentifiedArrayOf<Worktree>,
-    isGitRepository: Bool = true
+    isGitRepository: Bool = true,
+    host: RemoteHost? = nil
   ) {
     self.id = id
     self.rootURL = rootURL
     self.name = name
     self.worktrees = worktrees
     self.isGitRepository = isGitRepository
+    self.host = host
   }
 
   var initials: String {

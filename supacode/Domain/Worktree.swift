@@ -1,4 +1,5 @@
 import Foundation
+import SupacodeSettingsShared
 
 struct Worktree: Identifiable, Hashable, Sendable {
   let id: String
@@ -14,6 +15,11 @@ struct Worktree: Identifiable, Hashable, Sendable {
   /// branch-targeted actions so they don't reach a `git branch -m` call
   /// that has no real ref to operate on.
   let isAttached: Bool
+  /// SSH host this worktree lives on, or `nil` for a local worktree. When set,
+  /// `workingDirectory` / `repositoryRootURL` are *remote* paths and the
+  /// terminal launches via `ssh -tt <host> zmx attach …` (see
+  /// `WorktreeTerminalState.createSurface`).
+  let host: RemoteHost?
 
   nonisolated init(
     id: String,
@@ -23,7 +29,8 @@ struct Worktree: Identifiable, Hashable, Sendable {
     repositoryRootURL: URL,
     createdAt: Date? = nil,
     isMissing: Bool = false,
-    isAttached: Bool = true
+    isAttached: Bool = true,
+    host: RemoteHost? = nil
   ) {
     self.id = id
     self.name = name
@@ -33,6 +40,7 @@ struct Worktree: Identifiable, Hashable, Sendable {
     self.createdAt = createdAt
     self.isMissing = isMissing
     self.isAttached = isAttached
+    self.host = host
   }
 }
 

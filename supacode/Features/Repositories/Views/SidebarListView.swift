@@ -144,7 +144,7 @@ struct SidebarListView: View {
         if let repoIndex = repoIDs.firstIndex(of: repositoryID) {
           repoOffsets.insert(repoIndex)
         }
-      case .highlight, .placeholder:
+      case .highlight, .partitionHeader, .placeholder:
         continue
       }
     }
@@ -160,8 +160,8 @@ struct SidebarListView: View {
         .folder(let repositoryID, _),
         .failedRepository(let repositoryID, _, _, _):
         repoDestination = repoIDs.firstIndex(of: repositoryID) ?? repoIDs.count
-      case .highlight, .placeholder:
-        // Dropping above the highlight prefix collapses to "before the first repo".
+      case .highlight, .partitionHeader, .placeholder:
+        // Dropping above the highlight / partition prefix collapses to "before the first repo".
         repoDestination = 0
       }
     }
@@ -212,6 +212,9 @@ private struct SidebarSectionDispatcher: View {
         shortcutHintByID: shortcutHintByID
       )
       .moveDisabled(true)
+    case .partitionHeader(let kind):
+      SidebarPartitionHeaderView(kind: kind)
+        .moveDisabled(true)
     case .failedRepository(let repositoryID, let rootURL, let customTitle, let color):
       SidebarFailedRepositorySection(
         repositoryID: repositoryID,
@@ -283,6 +286,7 @@ private struct SidebarGitRepositorySection: View {
       SidebarSectionActionsView(
         repositoryID: repository.id,
         isRemovingRepository: isRemovingRepository,
+        isRemote: repository.host != nil,
         store: store
       )
     }
@@ -301,6 +305,10 @@ private struct SidebarGitRepositorySection: View {
 private struct SidebarSectionActionsView: View {
   let repositoryID: Repository.ID
   let isRemovingRepository: Bool
+  /// Remote (SSH) repositories hide the local-only "Repository Settings…" and
+  /// route Remove to `removeRemoteRepository` (drops the config; remote files
+  /// untouched). Worktree creation (`+`) works for remote repos too.
+  var isRemote: Bool = false
   let store: StoreOf<RepositoriesFeature>
 
   var body: some View {
@@ -310,15 +318,21 @@ private struct SidebarSectionActionsView: View {
       }
       .help("Set a custom title or color")
       .disabled(isRemovingRepository)
-      Button("Repository Settings…", systemImage: "gear") {
-        store.send(.openRepositorySettings(repositoryID))
+      if !isRemote {
+        Button("Repository Settings…", systemImage: "gear") {
+          store.send(.openRepositorySettings(repositoryID))
+        }
+        .help("Repository Settings")
       }
-      .help("Repository Settings")
       Divider()
-      Button("Remove Repository…", systemImage: "folder.badge.minus", role: .destructive) {
+      Button(
+        isRemote ? "Remove Remote Repository…" : "Remove Repository…",
+        systemImage: "folder.badge.minus",
+        role: .destructive
+      ) {
         store.send(.requestDeleteRepository(repositoryID))
       }
-      .help("Remove Repository")
+      .help(isRemote ? "Remove this remote repository (remote files are untouched)" : "Remove Repository")
       .disabled(isRemovingRepository)
     } label: {
       Image(systemName: "ellipsis")
@@ -387,6 +401,30 @@ private struct SidebarFailedRepositorySection: View {
       }
       .menuStyle(.secondaryToolbar)
     }
+  }
+}
+
+// MARK: - Local / Remote partition header.
+
+/// Standalone, non-selectable divider row that separates the Local and Remote
+/// repository groups. Only emitted by `SidebarStructure` when remote repos
+/// exist, so a purely-local sidebar never shows it.
+private struct SidebarPartitionHeaderView: View {
+  let kind: SidebarStructure.RepositoryLocality
+
+  var body: some View {
+    Label {
+      Text(kind.title)
+        .font(.caption.weight(.semibold))
+        .textCase(.uppercase)
+    } icon: {
+      Image(systemName: kind == .remote ? "network" : "desktopcomputer")
+        .accessibilityHidden(true)
+    }
+    .foregroundStyle(.secondary)
+    .listRowSeparator(.hidden)
+    .selectionDisabled()
+    .accessibilityAddTraits(.isHeader)
   }
 }
 
