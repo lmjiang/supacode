@@ -12,6 +12,10 @@ on:
         description: "Release tag (blank → v<MARKETING_VERSION>-fork.<run#>)"
         required: false
         type: string
+  # The sync routine's merge commit carries the "[release]" marker → auto-package.
+  # Ordinary pushes to main have no marker, so day-to-day commits never build.
+  push:
+    branches: [main]
 
 concurrency:
   group: release-fork
@@ -19,6 +23,9 @@ concurrency:
 
 jobs:
   build:
+    # Always on manual dispatch; on push only when the commit is marked (the
+    # routine's "sync: upstream <tag> [release]" merge), so normal pushes skip.
+    if: github.event_name == 'workflow_dispatch' || contains(github.event.head_commit.message, '[release]')
     runs-on: macos-26
     permissions:
       contents: write # create the release on this fork
