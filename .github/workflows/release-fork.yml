@@ -125,7 +125,7 @@ jobs:
         run: |
           set -euo pipefail
           TAG="${{ inputs.tag }}"
-          [ -n "$TAG" ] || TAG="v${VERSION}-fork.${{ github.run_number }}"
+          [ -n "$TAG" ] || TAG="v${VERSION}-remote.${{ github.run_number }}"
           cat > build/notes.md <<'EOF'
           Ad-hoc (unsigned, un-notarized) self-use fork build — includes remote SSH host support.
 
