@@ -16,7 +16,6 @@ struct WorktreeTerminalManagerReaperTests {
       $0.zmxClient = ZmxClient(
         executableURL: { nil },
         isBundled: { true },
-        wrapCommand: { _, _ in nil },
         killSession: { id in killed.withValue { $0.append(id) } },
         listSessionsWithClients: { listing }
       )
@@ -76,7 +75,6 @@ struct WorktreeTerminalManagerReaperTests {
       $0.zmxClient = ZmxClient(
         executableURL: { nil },
         isBundled: { true },
-        wrapCommand: { _, _ in nil },
         killSession: { id in killed.withValue { $0.append(id) } },
         listSessionsWithClients: { listing.value }
       )
