@@ -41,6 +41,11 @@ final class WorktreeInfoWatcherManager {
     let unfocused: Duration
   }
 
+  private static var defaultLineChangePollingEnabled: Bool {
+    ProcessInfo.processInfo.environment["SUPACODE_ENABLE_LINE_CHANGE_POLLING"] == "1"
+  }
+
+  private let lineChangePollingEnabled: Bool
   private let filesChangedDebounceInterval: Duration
   private let pullRequestSelectionRefreshCooldown: Duration
   private let refreshTiming: RefreshTiming
@@ -71,6 +76,7 @@ final class WorktreeInfoWatcherManager {
   init<C: Clock<Duration>>(
     focusedInterval: Duration = .seconds(30),
     unfocusedInterval: Duration = .seconds(60),
+    lineChangePollingEnabled: Bool = WorktreeInfoWatcherManager.defaultLineChangePollingEnabled,
     filesChangedDebounceInterval: Duration = .seconds(5),
     pullRequestSelectionRefreshCooldown: Duration = .seconds(5),
     clock: C = ContinuousClock(),
@@ -80,6 +86,7 @@ final class WorktreeInfoWatcherManager {
     }
   ) {
     refreshTiming = RefreshTiming(focused: focusedInterval, unfocused: unfocusedInterval)
+    self.lineChangePollingEnabled = lineChangePollingEnabled
     self.filesChangedDebounceInterval = filesChangedDebounceInterval
     self.pullRequestSelectionRefreshCooldown = pullRequestSelectionRefreshCooldown
     self.sleep = { duration in
@@ -126,7 +133,7 @@ final class WorktreeInfoWatcherManager {
       deferredLineChangeIDs.subtract(removedIDs)
     }
     let newIDs = desiredIDs.subtracting(currentIDs)
-    if !newIDs.isEmpty && !isInitialWorktreeLoad {
+    if lineChangePollingEnabled && !newIDs.isEmpty && !isInitialWorktreeLoad {
       deferredLineChangeIDs.formUnion(newIDs)
     }
     self.worktrees = worktreesByID
@@ -503,6 +510,11 @@ final class WorktreeInfoWatcherManager {
     immediate: Bool,
     forceReschedule: Bool = false
   ) {
+    guard lineChangePollingEnabled else {
+      lineChangeTasks.removeValue(forKey: worktreeID)?.task.cancel()
+      deferredLineChangeIDs.remove(worktreeID)
+      return
+    }
     guard worktrees[worktreeID] != nil else {
       return
     }
@@ -560,6 +572,7 @@ final class WorktreeInfoWatcherManager {
 
   private func emit(_ event: WorktreeInfoWatcherClient.Event) {
     if case .filesChanged(let worktreeID) = event,
+      lineChangePollingEnabled,
       deferredLineChangeIDs.contains(worktreeID)
     {
       return

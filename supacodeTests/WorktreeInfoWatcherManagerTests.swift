@@ -7,11 +7,31 @@ import Testing
 
 @MainActor
 struct WorktreeInfoWatcherManagerTests {
-  @Test func emitsLineChangesImmediatelyOnInitialWorktreeLoad() async throws {
+  @Test func doesNotEmitLineChangesByDefaultOnInitialWorktreeLoad() async throws {
     let tempWorktree = try makeTempWorktree()
     let manager = WorktreeInfoWatcherManager(
       focusedInterval: .seconds(3_600),
       unfocusedInterval: .seconds(3_600)
+    )
+    let (collector, task) = startCollecting(manager.eventStream())
+
+    manager.handleCommand(.setPullRequestTrackingEnabled(false))
+    manager.handleCommand(.setWorktrees([tempWorktree.worktree]))
+
+    await drainAsyncEvents(120)
+    #expect(await collector.filesChangedCount(worktreeID: tempWorktree.worktree.id) == 0)
+
+    manager.handleCommand(.stop)
+    await task.value
+    try FileManager.default.removeItem(at: tempWorktree.tempRoot)
+  }
+
+  @Test func emitsLineChangesImmediatelyOnInitialWorktreeLoad() async throws {
+    let tempWorktree = try makeTempWorktree()
+    let manager = WorktreeInfoWatcherManager(
+      focusedInterval: .seconds(3_600),
+      unfocusedInterval: .seconds(3_600),
+      lineChangePollingEnabled: true
     )
     let (collector, task) = startCollecting(manager.eventStream())
 
@@ -34,6 +54,7 @@ struct WorktreeInfoWatcherManagerTests {
     let manager = WorktreeInfoWatcherManager(
       focusedInterval: .milliseconds(80),
       unfocusedInterval: .milliseconds(80),
+      lineChangePollingEnabled: true,
       clock: clock
     )
     let (collector, task) = startCollecting(manager.eventStream())
@@ -72,7 +93,8 @@ struct WorktreeInfoWatcherManagerTests {
     )
     let manager = WorktreeInfoWatcherManager(
       focusedInterval: .seconds(3_600),
-      unfocusedInterval: .seconds(3_600)
+      unfocusedInterval: .seconds(3_600),
+      lineChangePollingEnabled: true
     )
     let (collector, task) = startCollecting(manager.eventStream())
 
@@ -247,12 +269,13 @@ struct WorktreeInfoWatcherManagerTests {
 
   @Test func capsTheEventBufferUnderBackpressure() async throws {
     let tempWorktree = try makeTempWorktree()
-    let manager = WorktreeInfoWatcherManager()
+    let manager = WorktreeInfoWatcherManager(lineChangePollingEnabled: true)
     manager.handleCommand(.setPullRequestTrackingEnabled(false))
     let stream = manager.eventStream()
 
-    // Each setWorktrees re-emits an immediate filesChanged for the worktree;
-    // with nothing draining, the buffer must cap rather than grow unbounded.
+    // When line-change polling is enabled, each setWorktrees re-emits an
+    // immediate filesChanged for the worktree; with nothing draining, the
+    // buffer must cap rather than grow unbounded.
     let overflow = WorktreeInfoWatcherManager.eventBufferCap + 50
     for _ in 0..<overflow {
       manager.handleCommand(.setWorktrees([tempWorktree.worktree]))

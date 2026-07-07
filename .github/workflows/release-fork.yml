@@ -14,8 +14,12 @@ on:
         type: string
   # The sync routine's merge commit carries the "[release]" marker → auto-package.
   # Ordinary pushes to main have no marker, so day-to-day commits never build.
+  # The patch branch always packages so a self-use binary can be produced
+  # without merging the fork branch back to main first.
   push:
-    branches: [main]
+    branches:
+      - main
+      - joker47/v0.10.5-disable-line-change-polling
 
 concurrency:
   group: release-fork
@@ -25,7 +29,10 @@ jobs:
   build:
     # Always on manual dispatch; on push only when the commit is marked (the
     # routine's "sync: upstream <tag> [release]" merge), so normal pushes skip.
-    if: github.event_name == 'workflow_dispatch' || contains(github.event.head_commit.message, '[release]')
+    if: >-
+      github.event_name == 'workflow_dispatch' ||
+      github.ref == 'refs/heads/joker47/v0.10.5-disable-line-change-polling' ||
+      contains(github.event.head_commit.message, '[release]')
     runs-on: macos-26
     permissions:
       contents: write # create the release on this fork
@@ -128,6 +135,8 @@ jobs:
           [ -n "$TAG" ] || TAG="v${VERSION}-remote.${{ github.run_number }}"
           cat > build/notes.md <<'EOF'
           Ad-hoc (unsigned, un-notarized) self-use fork build — includes remote SSH host support.
+
+          This build disables automatic line-change polling by default.
 
           First launch is blocked by Gatekeeper. To open:
 
