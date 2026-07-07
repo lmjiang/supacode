@@ -5,6 +5,9 @@ inputs:
   disable-tools:
     description: Comma-separated mise tools to skip, so CI installs only what it needs.
     default: spm:swiftlang/swift-format,npm:create-dmg
+  authenticate-tuist:
+    description: Whether to log in to Tuist Cloud.
+    default: "true"
 
 runs:
   using: composite
@@ -28,7 +31,9 @@ runs:
         version: 2026.3.0
         cache: true
     - name: Authenticate with Tuist
-      if: ${{ github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository }}
+      if: >-
+        inputs.authenticate-tuist == 'true' &&
+        (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository)
       shell: bash
       run: mise exec -- tuist auth login
     - name: Xcode cache key

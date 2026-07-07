@@ -44,38 +44,9 @@ jobs:
         with:
           submodules: recursive
 
-      # zig 0.15.2's linker can't link the macOS 26.4+ SDK (ziglang/zig#31272),
-      # which breaks the ghostty xcframework build. Pin to newest Xcode <= 26.3.
-      - name: Select Xcode <= 26.3
-        run: |
-          set -euo pipefail
-          selected=""
-          for app in /Applications/Xcode_26.3*.app /Applications/Xcode_26.2*.app \
-            /Applications/Xcode_26.1*.app /Applications/Xcode_26.0*.app; do
-            [ -d "$app" ] && { selected="$app"; break; }
-          done
-          [ -n "$selected" ] || { echo "::error::No Xcode <= 26.3 on runner"; ls -d /Applications/Xcode_*.app || true; exit 1; }
-          sudo xcode-select -s "$selected/Contents/Developer"
-          xcodebuild -version
-
-      - uses: jdx/mise-action@v4
+      - uses: ./.github/actions/setup-macos
         with:
-          version: 2026.3.0
-          cache: true
-
-      # GhosttyKit.xcframework is NOT committed (Frameworks/ only tracks .keep);
-      # build it from the ThirdParty/ghostty zig submodule, cached by its SHA.
-      - name: Ghostty cache key
-        run: echo "GHOSTTY_SHA=$(git -C ThirdParty/ghostty rev-parse HEAD)" >> "$GITHUB_ENV"
-      - name: Ghostty cache
-        id: ghostty_cache
-        uses: actions/cache@v5
-        with:
-          path: .build/ghostty
-          key: ${{ runner.os }}-${{ runner.arch }}-ghostty-fork-${{ env.GHOSTTY_SHA }}-${{ hashFiles('scripts/build-ghostty.sh', 'mise.toml', '.gitmodules') }}
-      - name: Build ghostty xcframework
-        if: steps.ghostty_cache.outputs.cache-hit != 'true'
-        run: make build-ghostty-xcframework
+          authenticate-tuist: "false"
 
       # Blank telemetry so the SDKs never initialize (AppTelemetry/AppCrashReporting
       # bail on an empty DSN/API key), regardless of the in-app settings toggle.
