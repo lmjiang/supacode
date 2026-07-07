@@ -9,7 +9,7 @@ on:
   workflow_dispatch:
     inputs:
       tag:
-        description: "Release tag (blank → v<MARKETING_VERSION>-fork.<run#>)"
+        description: "Release tag (blank → v<MARKETING_VERSION>-pollfix.<run#>)"
         required: false
         type: string
   # The sync routine's merge commit carries the "[release]" marker → auto-package.
@@ -132,9 +132,9 @@ jobs:
         run: |
           set -euo pipefail
           TAG="${{ inputs.tag }}"
-          [ -n "$TAG" ] || TAG="v${VERSION}-remote.${{ github.run_number }}"
+          [ -n "$TAG" ] || TAG="v${VERSION}-pollfix.${{ github.run_number }}"
           cat > build/notes.md <<'EOF'
-          Ad-hoc (unsigned, un-notarized) self-use fork build — includes remote SSH host support.
+          Ad-hoc (unsigned, un-notarized) self-use fork build.
 
           This build disables automatic line-change polling by default.
 
