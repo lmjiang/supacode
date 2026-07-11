@@ -68,13 +68,13 @@ private final class WorktreeFileEventMonitor {
     Self.release(&stream)
   }
 
-  private static func release(_ stream: inout FSEventStreamRef?) {
-    guard let stream else {
+  nonisolated private static func release(_ stream: inout FSEventStreamRef?) {
+    guard let streamRef = stream else {
       return
     }
-    FSEventStreamStop(stream)
-    FSEventStreamInvalidate(stream)
-    FSEventStreamRelease(stream)
+    FSEventStreamStop(streamRef)
+    FSEventStreamInvalidate(streamRef)
+    FSEventStreamRelease(streamRef)
     stream = nil
   }
 }
