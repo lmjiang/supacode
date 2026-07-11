@@ -70,6 +70,13 @@ jobs:
       - name: Build ghostty xcframework
         if: steps.ghostty_cache.outputs.cache-hit != 'true'
         run: make build-ghostty-xcframework
+      - name: Save Ghostty cache
+        if: steps.ghostty_cache.outputs.cache-hit != 'true'
+        continue-on-error: true
+        uses: actions/cache/save@v5
+        with:
+          path: .build/ghostty
+          key: ${{ runner.os }}-${{ runner.arch }}-ghostty-fork-${{ env.GHOSTTY_SHA }}-${{ hashFiles('scripts/build-ghostty.sh', 'mise.toml', '.gitmodules') }}
 
       # Blank telemetry so the SDKs never initialize (AppTelemetry/AppCrashReporting
       # bail on an empty DSN/API key), regardless of the in-app settings toggle.
