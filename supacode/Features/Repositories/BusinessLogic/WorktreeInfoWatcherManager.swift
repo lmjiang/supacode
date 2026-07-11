@@ -61,17 +61,21 @@ private final class WorktreeFileEventMonitor {
   }
 
   deinit {
-    cancel()
+    Self.release(&stream)
   }
 
   func cancel() {
+    Self.release(&stream)
+  }
+
+  private static func release(_ stream: inout FSEventStreamRef?) {
     guard let stream else {
       return
     }
     FSEventStreamStop(stream)
     FSEventStreamInvalidate(stream)
     FSEventStreamRelease(stream)
-    self.stream = nil
+    stream = nil
   }
 }
 
