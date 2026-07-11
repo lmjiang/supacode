@@ -32,6 +32,7 @@ jobs:
     env:
       MISE_HTTP_TIMEOUT: "120"
       MISE_GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      MISE_DISABLE_TOOLS: spm:swiftlang/swift-format,swiftlint,npm:create-dmg,github:ldomaradzki/xcsift
     steps:
       - uses: actions/checkout@v6
         with:
