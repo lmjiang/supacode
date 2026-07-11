@@ -1,0 +1,144 @@
+# Self-use fork release: ad-hoc signed (no Apple Developer ID, no notarization,
+# no Sparkle, no telemetry), published to THIS fork's Releases. Trigger manually
+# after syncing an upstream release tag into fork main. Deliberately standalone —
+# it touches none of upstream's workflows/Makefile, so `git merge` of upstream
+# never conflicts here.
+name: Release (fork ad-hoc)
+
+on:
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Release tag (blank → v<MARKETING_VERSION>-fork.<run#>)"
+        required: false
+        type: string
+  # The sync routine's merge commit carries the "[release]" marker → auto-package.
+  # Ordinary pushes to main have no marker, so day-to-day commits never build.
+  push:
+    branches: [main]
+
+concurrency:
+  group: release-fork
+  cancel-in-progress: false
+
+jobs:
+  build:
+    # Always on manual dispatch; on push only when the commit is marked (the
+    # routine's "sync: upstream <tag> [release]" merge), so normal pushes skip.
+    if: github.event_name == 'workflow_dispatch' || contains(github.event.head_commit.message, '[release]')
+    runs-on: macos-26
+    permissions:
+      contents: write # create the release on this fork
+    env:
+      MISE_HTTP_TIMEOUT: "120"
+      MISE_GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          submodules: recursive
+
+      # zig 0.15.2's linker can't link the macOS 26.4+ SDK (ziglang/zig#31272),
+      # which breaks the ghostty xcframework build. Pin to newest Xcode <= 26.3.
+      - name: Select Xcode <= 26.3
+        run: |
+          set -euo pipefail
+          selected=""
+          for app in /Applications/Xcode_26.3*.app /Applications/Xcode_26.2*.app \
+            /Applications/Xcode_26.1*.app /Applications/Xcode_26.0*.app; do
+            [ -d "$app" ] && { selected="$app"; break; }
+          done
+          [ -n "$selected" ] || { echo "::error::No Xcode <= 26.3 on runner"; ls -d /Applications/Xcode_*.app || true; exit 1; }
+          sudo xcode-select -s "$selected/Contents/Developer"
+          xcodebuild -version
+
+      - uses: jdx/mise-action@v4
+        with:
+          version: 2026.3.0
+          cache: true
+
+      # GhosttyKit.xcframework is NOT committed (Frameworks/ only tracks .keep);
+      # build it from the ThirdParty/ghostty zig submodule, cached by its SHA.
+      - name: Ghostty cache key
+        run: echo "GHOSTTY_SHA=$(git -C ThirdParty/ghostty rev-parse HEAD)" >> "$GITHUB_ENV"
+      - name: Ghostty cache
+        id: ghostty_cache
+        uses: actions/cache@v5
+        with:
+          path: .build/ghostty
+          key: ${{ runner.os }}-${{ runner.arch }}-ghostty-fork-${{ env.GHOSTTY_SHA }}-${{ hashFiles('scripts/build-ghostty.sh', 'mise.toml', '.gitmodules') }}
+      - name: Build ghostty xcframework
+        if: steps.ghostty_cache.outputs.cache-hit != 'true'
+        run: make build-ghostty-xcframework
+
+      # Blank telemetry so the SDKs never initialize (AppTelemetry/AppCrashReporting
+      # bail on an empty DSN/API key), regardless of the in-app settings toggle.
+      - name: Strip telemetry from the build
+        run: |
+          set -euo pipefail
+          mkdir -p build
+          cat > build/ForkOverrides.xcconfig <<'EOF'
+          SENTRY_DSN =
+          POSTHOG_API_KEY =
+          POSTHOG_HOST =
+          EOF
+          echo "XCODE_XCCONFIG_FILE=$PWD/build/ForkOverrides.xcconfig" >> "$GITHUB_ENV"
+
+      # Release-configured project, no Tuist Cloud binary cache (fork has no access
+      # to upstream's `fullHandle`); `--cache-profile none` mirrors `make archive`.
+      - name: Generate Xcode project (Release)
+        run: |
+          mise exec -- tuist install --force-resolved-versions
+          mise exec -- tuist generate --no-open --cache-profile none --configuration Release
+
+      # Ad-hoc signature ("-"): runs on any Mac after clearing the quarantine
+      # attribute; no Developer ID / notarization needed.
+      - name: Archive (ad-hoc signed)
+        run: |
+          set -euo pipefail
+          xcodebuild \
+            -workspace supacode.xcworkspace \
+            -scheme supacode \
+            -configuration Release \
+            -destination "generic/platform=macOS" \
+            -archivePath build/supacode.xcarchive \
+            archive \
+            CODE_SIGN_STYLE=Manual \
+            CODE_SIGN_IDENTITY="-" \
+            CODE_SIGNING_REQUIRED=NO \
+            CODE_SIGNING_ALLOWED=YES \
+            DEVELOPMENT_TEAM="" \
+            -skipMacroValidation \
+            2>&1 | mise exec -- xcbeautify --quiet --disable-logging
+
+      - name: Package .app → zip
+        run: |
+          set -euo pipefail
+          APP="$(find build/supacode.xcarchive/Products/Applications -maxdepth 1 -name 'supacode.app' -print -quit)"
+          [ -n "$APP" ] || { echo "::error::supacode.app not found in archive"; exit 1; }
+          VERSION="$(/usr/libexec/PlistBuddy -c 'Print :CFBundleShortVersionString' "$APP/Contents/Info.plist")"
+          echo "VERSION=$VERSION" >> "$GITHUB_ENV"
+          ditto -c -k --sequesterRsrc --keepParent "$APP" build/supacode.app.zip
+
+      - name: Create GitHub Release (this fork)
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          TAG="${{ inputs.tag }}"
+          [ -n "$TAG" ] || TAG="v${VERSION}-remote.${{ github.run_number }}"
+          cat > build/notes.md <<'EOF'
+          Ad-hoc (unsigned, un-notarized) self-use fork build — includes remote SSH host support.
+
+          First launch is blocked by Gatekeeper. To open:
+
+          ```
+          xattr -dr com.apple.quarantine /Applications/supacode.app
+          ```
+
+          or right-click the app → Open. No telemetry is bundled (Sentry/PostHog disabled at build time).
+          EOF
+          gh release create "$TAG" build/supacode.app.zip \
+            --repo "${{ github.repository }}" \
+            --target "${{ github.sha }}" \
+            --title "$TAG" \
+            --notes-file build/notes.md
