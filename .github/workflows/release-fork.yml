@@ -1,5 +1,5 @@
 # Self-use fork release: ad-hoc signed (no Apple Developer ID, no notarization,
-# no Sparkle, no telemetry), published to THIS fork's Releases. Trigger manually
+# no telemetry), published to THIS fork's Releases. Trigger manually
 # after syncing an upstream release tag into fork main. Deliberately standalone —
 # it touches none of upstream's workflows/Makefile, so `git merge` of upstream
 # never conflicts here.
@@ -147,7 +147,53 @@ jobs:
           </dict>
           </plist>
           EOF
+          sign_path() {
+            local path="$1"
+            shift
+            codesign --force --sign - --options runtime "$@" "$path"
+          }
+
+          code_roots=(
+            "$APP/Contents/Frameworks"
+            "$APP/Contents/PlugIns"
+            "$APP/Contents/Resources"
+            "$APP/Contents/XPCServices"
+            "$APP/Contents/Library/LoginItems"
+          )
+
+          code_paths=()
+          for root in "${code_roots[@]}"; do
+            [ -d "$root" ] || continue
+            while IFS= read -r -d '' path; do
+              code_paths+=("$path")
+            done < <(
+              find "$root" \
+                \( -type d \( -name '*.app' -o -name '*.appex' -o -name '*.framework' -o -name '*.xpc' \) \
+                -o -type f \( -name '*.dylib' -o -perm -111 \) \) \
+                -print0
+            )
+          done
+
+          if [ "${#code_paths[@]}" -gt 0 ]; then
+            while IFS=$'\t' read -r _ path; do
+              case "$path" in
+                *.app|*.appex|*.xpc)
+                  sign_path "$path" --preserve-metadata=entitlements
+                  ;;
+                *)
+                  sign_path "$path"
+                  ;;
+              esac
+            done < <(
+              for path in "${code_paths[@]}"; do
+                slash_count=${path//[^\/]/}
+                printf '%s\t%s\n' "${#slash_count}" "$path"
+              done | sort -rn -k1,1
+            )
+          fi
+
           codesign --force --sign - --options runtime --entitlements build/ForkAdHoc.entitlements "$APP"
+          codesign --verify --deep --strict --verbose=4 "$APP"
           VERSION="$(/usr/libexec/PlistBuddy -c 'Print :CFBundleShortVersionString' "$APP/Contents/Info.plist")"
           echo "VERSION=$VERSION" >> "$GITHUB_ENV"
           ditto -c -k --sequesterRsrc --keepParent "$APP" build/supacode.app.zip
