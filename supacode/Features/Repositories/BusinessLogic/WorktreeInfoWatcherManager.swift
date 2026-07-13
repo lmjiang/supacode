@@ -137,7 +137,7 @@ final class WorktreeInfoWatcherManager {
   init<C: Clock<Duration>>(
     focusedInterval: Duration = .seconds(30),
     unfocusedInterval: Duration = .seconds(60),
-    filesChangedDebounceInterval: Duration = .seconds(5),
+    filesChangedDebounceInterval: Duration = .seconds(1),
     pullRequestSelectionRefreshCooldown: Duration = .seconds(5),
     clock: C = ContinuousClock(),
     pollRemoteBranch: @escaping @Sendable (Worktree) async -> String? = { worktree in
