@@ -162,6 +162,8 @@ final class WorktreeInfoWatcherManager {
       setSelectedWorktreeID(worktreeID)
     case .setPullRequestTrackingEnabled(let isEnabled):
       setPullRequestTrackingEnabled(isEnabled)
+    case .refresh:
+      refreshAll()
     case .stop:
       stopAll()
     }
@@ -343,7 +345,14 @@ final class WorktreeInfoWatcherManager {
     branchDebounceTasks[worktreeID]?.cancel()
     let sleep = self.sleep
     let task = Task { [weak self, sleep] in
-      try? await sleep(.milliseconds(200))
+      do {
+        try await sleep(.milliseconds(200))
+      } catch {
+        return
+      }
+      guard !Task.isCancelled else {
+        return
+      }
       await MainActor.run {
         self?.emitBranchChanged(worktreeID: worktreeID)
       }
@@ -356,7 +365,14 @@ final class WorktreeInfoWatcherManager {
     let debounceInterval = filesChangedDebounceInterval
     let sleep = self.sleep
     let task = Task { [weak self, sleep] in
-      try? await sleep(debounceInterval)
+      do {
+        try await sleep(debounceInterval)
+      } catch {
+        return
+      }
+      guard !Task.isCancelled else {
+        return
+      }
       await MainActor.run {
         guard let self else { return }
         self.emitLineChangesChanged(worktreeID: worktreeID)
@@ -369,7 +385,14 @@ final class WorktreeInfoWatcherManager {
     restartTasks[worktreeID]?.cancel()
     let sleep = self.sleep
     let task = Task { [weak self, sleep] in
-      try? await sleep(.seconds(5))
+      do {
+        try await sleep(.seconds(5))
+      } catch {
+        return
+      }
+      guard !Task.isCancelled else {
+        return
+      }
       await MainActor.run {
         self?.restartWatcher(worktreeID: worktreeID)
       }
@@ -528,6 +551,19 @@ final class WorktreeInfoWatcherManager {
     emit(.repositoryPullRequestRefresh(repositoryRootURL: repositoryRootURL, worktreeIDs: worktreeIDs))
   }
 
+  private func refreshAll() {
+    let worktreesToRefresh = worktrees.values.sorted { $0.id.rawValue < $1.id.rawValue }
+    for worktree in worktreesToRefresh {
+      emitLineChangesChanged(worktreeID: worktree.id)
+    }
+    let repositoryRoots = Set(worktrees.values.map(\.repositoryRootURL)).sorted {
+      $0.path(percentEncoded: false) < $1.path(percentEncoded: false)
+    }
+    for repositoryRootURL in repositoryRoots {
+      refreshPullRequests(repositoryRootURL: repositoryRootURL)
+    }
+  }
+
   private func repositoryWorktreeIDs(for repositoryRootURL: URL) -> [Worktree.ID] {
     worktrees
       .values
@@ -572,11 +608,10 @@ final class WorktreeInfoWatcherManager {
   }
 
   private func emitBranchChanged(worktreeID: Worktree.ID) {
-    guard let worktree = worktrees[worktreeID] else {
+    guard worktrees[worktreeID] != nil else {
       return
     }
     emit(.branchChanged(worktreeID: worktreeID))
-    refreshPullRequests(repositoryRootURL: worktree.repositoryRootURL)
   }
 
   private func emit(_ event: WorktreeInfoWatcherClient.Event) {
