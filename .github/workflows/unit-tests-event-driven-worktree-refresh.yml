@@ -1,0 +1,30 @@
+name: Check (event-driven worktree refresh)
+
+on:
+  push:
+    branches:
+      - ci/event-driven-worktree-refresh
+  workflow_dispatch: {}
+
+concurrency:
+  group: unit-tests-event-driven-worktree-refresh-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  check:
+    runs-on: macos-26
+    permissions:
+      contents: read
+    env:
+      MISE_HTTP_TIMEOUT: 120
+      MISE_GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+    steps:
+      - uses: actions/checkout@v6
+      - name: Limit mise to format and lint tools
+        run: echo "MISE_DISABLE_TOOLS=tuist,zig,xcbeautify,github:ldomaradzki/xcsift,npm:create-dmg" >> "$GITHUB_ENV"
+      - uses: jdx/mise-action@v4
+        with:
+          version: 2026.3.0
+          cache: true
+          experimental: true
+      - run: make check
